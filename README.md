@@ -8,8 +8,8 @@
 **Offline A/B change-validation for an agentic coding harness — stat-gated, seed-blocked,
 reusing the executor as the arm.**
 
-abproof answers one question: *did this change to the harness actually make it better?* It runs
-the **same execute-node loop** twice — baseline vs. treatment — over a corpus of RED-test-gated
+abproof answers one question: *did this change to your agent setup actually make it better?* It runs
+the **same executor** twice — baseline vs. treatment — over a corpus of RED-test-gated
 tasks, with seed-blocked pairing, task-typed scoring, and a statistical gate, and prints a
 PASS/FAIL verdict you can trust. It is the "better, proven" oracle the rest of the toolkit is
 measured against.
@@ -68,8 +68,8 @@ judge-calls, minutes, and claude-cli calls before you spend anything.
 | `64` | usage error |
 
 abproof is deliberately **fail-loud**, not fail-open: an offline oracle that silently returned a
-green verdict on a broken run would be worse than useless. (It still honours the constitution —
-it is offline, never in the live agent loop; "absent abproof" simply means the harness goes
+green verdict on a broken run would be worse than useless. (It still stays out of the way —
+offline, never in the live agent loop; "absent abproof" simply means your setup goes
 unmeasured.)
 
 See [`CONTRACT.md`](CONTRACT.md) for the full interface.

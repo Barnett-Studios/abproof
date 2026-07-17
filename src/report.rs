@@ -54,7 +54,7 @@ pub struct ResultRecord {
     /// Non-empty when a validity constraint was violated (e.g. num_turns > 1 on a claude-cli arm).
     pub validity_warnings: Vec<String>,
     /// Number of (node, rep) pairs excluded because either arm was `Inconclusive`
-    /// (ADR-0041 §per-node soft-exclusion, A5).
+    /// (per-node soft-exclusion).
     pub inconclusive_count: u64,
     /// `inconclusive_count / total_pairs_attempted`; `0.0` when no pairs were
     /// attempted. Compared against `INCONCLUSIVE_MAX_FRACTION` (A6).
@@ -150,7 +150,7 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
     }
 
     // Inconclusive exclusions — rendered only when at least one pair was excluded
-    // (ADR-0041 §per-node soft-exclusion / A6 fail-loud floor).
+    // (per-node soft-exclusion / fail-loud floor).
     if rec.inconclusive_count > 0 {
         out.push('\n');
         out.push_str(&format!(
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn write_result_json_roundtrip() {
         let rec = sample_result_record();
-        let path = std::env::temp_dir().join("dotclaude-measure-report-test.json");
+        let path = std::env::temp_dir().join("abproof-report-test.json");
         write_result_json(&path, &rec).expect("write");
         let content = std::fs::read_to_string(&path).expect("read");
         let v: serde_json::Value = serde_json::from_str(&content).expect("parse json");
@@ -325,7 +325,7 @@ mod tests {
             inconclusive_count: 0,
             inconclusive_fraction: 0.0,
         };
-        let path = std::env::temp_dir().join("dotclaude-measure-abort-test.json");
+        let path = std::env::temp_dir().join("abproof-abort-test.json");
         write_result_json(&path, &rec).expect("write");
         let content = std::fs::read_to_string(&path).expect("read");
         let v: serde_json::Value = serde_json::from_str(&content).expect("parse json");

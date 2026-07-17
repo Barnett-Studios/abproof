@@ -2,8 +2,8 @@
 //!
 //! Exercises `run_experiment` end-to-end without I/O by wiring `ArmDistinctDriver`
 //! (a local counting driver) and `StubJudge` over the real `py-add` corpus node.
-//! The `measure run --dry-run` CLI path is tested in the binary crate
-//! (`crates/dotclaude/tests/cli.rs`), where `CARGO_BIN_EXE_dotclaude` resolves.
+//! The `run --dry-run` CLI path is tested against the `abproof` binary, where
+//! `CARGO_BIN_EXE_abproof` resolves.
 
 use abproof::{
     corpus::{self, NodeJson},
@@ -148,8 +148,8 @@ fn load_py_add() -> Vec<abproof::corpus::CorpusNode> {
 fn crate_links_and_exposes_usage() {
     let u = abproof::cli_usage();
     assert!(
-        u.contains("measure run"),
-        "usage must document `measure run`, got: {u}"
+        u.contains("abproof run"),
+        "usage must document `abproof run`, got: {u}"
     );
 }
 

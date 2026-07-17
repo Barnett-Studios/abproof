@@ -25,7 +25,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new(label: &str) -> Self {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("dotclaude-lnd-{label}-{id}"));
+        let dir = std::env::temp_dir().join(format!("abproof-lnd-{label}-{id}"));
         fs::create_dir_all(&dir).expect("create tempdir");
         Self(dir)
     }
@@ -87,7 +87,7 @@ fn execute_node_script() -> PathBuf {
     execute_node_path()
 }
 
-/// The execute-node loop is the Executor component — absent when abproof is built
+/// The execute-node loop is the executor — absent when abproof is built
 /// standalone (only present inside a full harness checkout). These contract tests
 /// shell it, so they skip cleanly when it is not on disk.
 fn loop_available() -> bool {
@@ -179,7 +179,7 @@ fn local_node_driver_fills_stub_via_mock() {
 fn local_node_driver_timeout_scores_inconclusive() {
     // accept = long sleep; timeout = 1s → execute_node.py is killed before
     // the model is even called; driver returns Inconclusive (a wall-clock
-    // kill with no gradable completion, ADR-0042 timeout-collapse), never
+    // kill with no gradable completion, timeout-collapse), never
     // propagates Err.
     if !loop_available() {
         eprintln!("skip: execute-node loop (Executor) absent — standalone build");

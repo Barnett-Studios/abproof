@@ -1,8 +1,7 @@
 # abproof — Contract
 
-abproof is the **Proving Ground** component: it turns a *harness change* into a stat-gated A/B
-verdict over a corpus, reusing the Executor as the arm. Two front doors (CLI + library crate) wrap
-one core.
+abproof turns a *change to your agent setup* into a stat-gated A/B verdict over a corpus, reusing
+an executor as the measured arm. Two front doors (CLI + library crate) wrap one core.
 
 ## The measurement-integrity guarantee (fail-loud, by design)
 
@@ -45,10 +44,9 @@ pub mod worktree;   // seed-project work-tree provisioner
 pub mod env_filter; // child-process env allowlist (inlined; no framework dependency)
 ```
 
-The library carries **no dependency on the rest of the harness** — the two former intra-workspace
-couplings (`provider::filter_child_env`, `paths::framework_root`) are inlined / replaced by
-`env_filter` and the `ABPROOF_CORPUS` resolver. It drives the Executor (`execute_node.py`) and
-`claude -p` over **subprocess** boundaries only.
+The library is **fully standalone** — it inlines what it needs (`env_filter`, the `ABPROOF_CORPUS`
+resolver) and depends on no engine crate. It drives an executor (the reference is the
+`execute_node.py` loop) and `claude -p` over **subprocess** boundaries only.
 
 ## The A/B model (what the gate means)
 

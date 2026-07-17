@@ -20,7 +20,7 @@ pub struct PairedRep {
 ///
 /// `LocalUnavailable` maps to 0.0; abort detection in `run_experiment` catches it
 /// separately before the gate is evaluated (I3). `Inconclusive` also maps to 0.0
-/// here, but `run_experiment`'s pair-level exclusion (ADR-0041 §per-node
+/// here, but `run_experiment`'s pair-level exclusion (per-node
 /// soft-exclusion) drops any pair touching it before this function is ever called
 /// on that pair, so 0.0 is never actually observed in the aggregate for it.
 /// `Skipped` is also 0.0 for now — a Skipped RED-baseline node is a corpus curation

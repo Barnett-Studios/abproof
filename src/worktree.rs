@@ -2,7 +2,7 @@
 //!
 //! `execute_node.py` requires `EXECUTE_NODE_ROOT` to point at a **clean git repo**
 //! containing the RED stub file(s) and the acceptance test; it aborts
-//! `FAILURE(dirty_tree)` otherwise. Nothing in the harness materialized such a tree
+//! `FAILURE(dirty_tree)` otherwise. Nothing upstream materialized such a tree
 //! from a corpus node — so every real run reached the model on zero nodes. This
 //! module builds that tree: a fresh temp repo with one clean baseline commit, torn
 //! down on drop.
@@ -46,7 +46,7 @@ impl NodeWorkspace {
     /// and so `execute_node.py`'s own success commit stays hook-free too.
     pub fn create(spec: &MaterializeSpec) -> Result<NodeWorkspace, WorktreeError> {
         let n = WT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("dotclaude-wt-{}-{n}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("abproof-wt-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&root)
             .map_err(|e| WorktreeError::Io(format!("create {}: {e}", root.display())))?;
         // Guard is live from here: any `?` below removes the dir on drop.
@@ -81,8 +81,8 @@ impl NodeWorkspace {
 
     fn init_repo(&self) -> Result<(), WorktreeError> {
         self.git(&["init", "-q"])?;
-        self.git(&["config", "user.email", "harness@dotclaude.local"])?;
-        self.git(&["config", "user.name", "dotclaude-harness"])?;
+        self.git(&["config", "user.email", "abproof@localhost"])?;
+        self.git(&["config", "user.name", "abproof"])?;
         self.git(&["config", "commit.gpgsign", "false"])?;
         // /dev/null is not a directory: git finds no hooks there, so none run.
         self.git(&["config", "core.hooksPath", "/dev/null"])?;

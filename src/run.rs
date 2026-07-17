@@ -61,10 +61,10 @@ pub fn pass_at_1_2(statuses: &[String], attempts: &[u64]) -> (f64, f64) {
 
 /// Produce the Python-oracle-compatible status string for a run output.
 ///
-/// The driver emits an empty `stdout_tail` for a harness-side SIGKILL (the python
+/// The driver emits an empty `stdout_tail` for a executor-side SIGKILL (the python
 /// process was killed before producing a final line); the executor can also emit
 /// its own `INCONCLUSIVE(<reason>)` terminal line. Both collapse to
-/// `RunStatus::Inconclusive` (ADR-0042 timeout-collapse) — normalise both to the
+/// `RunStatus::Inconclusive` (timeout-collapse) — normalise both to the
 /// literal string `"Inconclusive"` here so `wellformed_pct` drops them uniformly
 /// from its denominator regardless of which producer fired.
 fn effective_status_string(out: &driver::RunOutput) -> String {
@@ -229,7 +229,7 @@ pub fn run_experiment(
     // Validity warnings (spec §8: num_turns > 1 on a claude-cli arm).
     let mut validity_warnings: Vec<String> = vec![];
 
-    // Inconclusive-fraction tracking (ADR-0041 fail-loud floor, A6).
+    // Inconclusive-fraction tracking (fail-loud floor).
     // `total_pairs` counts every (node, rep) iteration reached this run;
     // `inconclusive_pairs` counts those excluded because either arm was
     // Inconclusive (A5). The ratio is compared against
@@ -310,7 +310,7 @@ pub fn run_experiment(
                 continue;
             }
 
-            // A5 / ADR-0041 §per-node soft-exclusion: an Inconclusive artifact in
+            // per-node soft-exclusion: an Inconclusive artifact in
             // either arm breaks the paired Wilcoxon delta for this (node, rep) —
             // exclude the whole pair, mirroring the Skipped gate above, and BEFORE
             // node_pass_score is ever called on either arm. Tracked separately for
@@ -434,7 +434,7 @@ pub fn run_experiment(
         }
     }
 
-    // ── A6 / ADR-0041 fail-loud floor ────────────────────────────────────────
+    // ── fail-loud floor ────────────────────────────────────────
     // Per-node Inconclusive soft-excludes (A5) and does NOT abort on its own.
     // But a run that could not grade more than INCONCLUSIVE_MAX_FRACTION of its
     // pairs is not a valid measurement — raise a validity_warning and abort
@@ -670,7 +670,7 @@ pub fn run_experiment(
 
 // ── private helpers ──────────────────────────────────────────────────────────
 
-/// Default `INCONCLUSIVE_MAX_FRACTION` (ADR-0041): a run that could not grade
+/// Default `INCONCLUSIVE_MAX_FRACTION`: a run that could not grade
 /// more than this fraction of its paired-rep battery is not a valid measurement.
 const INCONCLUSIVE_MAX_FRACTION_DEFAULT: f64 = 0.20;
 

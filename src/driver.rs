@@ -21,11 +21,11 @@ pub enum RunStatus {
     Failure,
     Skipped,
     LocalUnavailable,
-    /// A per-node artifact with no gradable completion (ADR-0041/0042): a
+    /// A per-node artifact with no gradable completion: a
     /// generation/wall-clock timeout, a transport-malformed response, or a
     /// healthy-then-conn-refused rung. Soft-excludes the pair; never scored
     /// as a capability miss. Subsumes the former `Timeout` variant — a
-    /// harness-side SIGKILL is exactly this per-node non-verdict.
+    /// executor-side SIGKILL is exactly this per-node non-verdict.
     Inconclusive,
 }
 
@@ -95,8 +95,8 @@ pub fn parse_usage_line(line: &str) -> ParsedUsage {
 /// Parse the last non-empty stdout line from `execute_node.py` into a [`RunStatus`].
 ///
 /// Recognises the literal terminal markers `SUCCESS` / `LOCAL_UNAVAILABLE`, and the
-/// prefixes `SKIPPED(...)` / `INCONCLUSIVE(...)` (ADR-0042 taxonomy). Any other line
-/// — including the empty string produced when the harness SIGKILLs the process before
+/// prefixes `SKIPPED(...)` / `INCONCLUSIVE(...)`. Any other line
+/// — including the empty string produced when the executor SIGKILLs the process before
 /// it can emit a final line — falls open to `Failure` (never a silent capability pass).
 pub fn parse_status_line(last_line: &str) -> RunStatus {
     if last_line == "SUCCESS" {
@@ -325,7 +325,7 @@ impl SessionDriver for LocalNodeDriver {
         let node_json = serde_json::to_string(node)
             .map_err(|e| DriverError::Io(format!("serialize node: {e}")))?;
         let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_path = std::env::temp_dir().join(format!("dotclaude-node-{}-{id}.json", node.id));
+        let temp_path = std::env::temp_dir().join(format!("abproof-node-{}-{id}.json", node.id));
         std::fs::write(&temp_path, &node_json)
             .map_err(|e| DriverError::Io(format!("write node temp: {e}")))?;
         let _temp_guard = TempFile(temp_path.clone());
@@ -659,7 +659,7 @@ mod tests {
         assert!(!out.accept_passed);
     }
 
-    // ── status-line parsing (A4 / ADR-0042) ─────────────────────────────────────
+    // ── status-line parsing ─────────────────────────────────────
 
     #[test]
     fn parse_status_line_inconclusive_with_reason() {
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn parse_status_line_falls_open_to_failure_on_unrecognised_or_empty() {
-        // Empty stdout (the harness-side SIGKILL path constructs Inconclusive
+        // Empty stdout (the executor-side SIGKILL path constructs Inconclusive
         // directly rather than through this parser — see the recv_timeout
         // branch) and any unrecognised line both fall open to Failure here.
         assert_eq!(parse_status_line(""), RunStatus::Failure);

@@ -11,9 +11,9 @@ pub mod score;
 pub mod stats;
 pub mod worktree;
 
-/// Usage string for the `measure` subcommand (printed on bare/unknown invocation).
+/// Usage string for the `run` subcommand (printed on bare/unknown invocation).
 pub fn cli_usage() -> &'static str {
-    "usage: dotclaude measure run <manifest.yaml> \
+    "usage: abproof run <manifest.yaml> \
      [--dry-run | --confirm] [--out <path>] \
      [--max-cost <usd>] [--max-calls <n>]"
 }

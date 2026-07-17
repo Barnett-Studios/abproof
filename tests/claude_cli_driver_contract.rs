@@ -18,7 +18,7 @@ struct TempDir(std::path::PathBuf);
 impl TempDir {
     fn new(prefix: &str) -> Self {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("dotclaude-cctest-{prefix}-{id}"));
+        let p = std::env::temp_dir().join(format!("abproof-cctest-{prefix}-{id}"));
         fs::create_dir_all(&p).unwrap();
         Self(p)
     }
@@ -67,7 +67,7 @@ fn execute_node_script() -> std::path::PathBuf {
     execute_node_path()
 }
 
-/// Skip guard for tests that shell the execute-node loop (the Executor component): the
+/// Skip guard for tests that shell the execute-node loop (the executor): the
 /// loop is present in-workspace but absent in a standalone `abproof` checkout, so these
 /// cross-component integration tests skip cleanly there rather than fail. Set
 /// `$ABPROOF_EXECUTE_NODE` to run them against a loop outside a checkout.
@@ -206,7 +206,7 @@ fn claude_cli_backend_fills_stub_via_fake_claude() {
     // Requires python3 + git on PATH. Deterministic via fake claude binary.
     // NO EXECUTE_NODE_MOCK — the real claude-cli backend path is exercised.
     if !loop_available() {
-        eprintln!("skip: execute-node loop not found (standalone abproof; needs the Executor)");
+        eprintln!("skip: execute-node loop not found (standalone abproof; needs an executor)");
         return;
     }
     let repo = TempDir::new("ccdrv-repo");
@@ -290,7 +290,7 @@ fn claude_cli_backend_fills_stub_via_fake_claude() {
 #[test]
 fn local_driver_materializes_worktree_and_succeeds_via_mock() {
     if !loop_available() {
-        eprintln!("skip: execute-node loop not found (standalone abproof; needs the Executor)");
+        eprintln!("skip: execute-node loop not found (standalone abproof; needs an executor)");
         return;
     }
     let node = abproof::corpus::load_node(
