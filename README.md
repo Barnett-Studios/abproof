@@ -87,4 +87,4 @@ toolkit: [cxpak](https://github.com/Barnett-Studios/cxpak) ·
 [commitward](https://github.com/Barnett-Studios/commitward) ·
 [cascadr](https://github.com/Barnett-Studios/cascadr) · **abproof** ·
 [cordon](https://github.com/Barnett-Studios/cordon) ·
-[planner](https://github.com/Barnett-Studios/planner).
+[slicr](https://github.com/Barnett-Studios/slicr).
