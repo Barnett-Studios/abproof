@@ -5,6 +5,10 @@ edition = "2021"
 description = "Offline A/B change-validation harness — stat-gated, seed-blocked, reuses the executor as the arm"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Barnett-Studios/abproof"
+rust-version = "1.94"
+readme = "README.md"
+keywords = ["ab-testing", "benchmark", "llm", "agent", "evaluation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "abproof"
