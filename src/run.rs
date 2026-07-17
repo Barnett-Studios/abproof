@@ -1355,7 +1355,10 @@ mod tests {
             rec.aborted,
             "a gated metric missing from the baseline must abort, not fabricate a pass"
         );
-        assert_eq!(rec.gate_exit, 3, "aborted → gate_exit must be 3, never 0 (false PASS)");
+        assert_eq!(
+            rec.gate_exit, 3,
+            "aborted → gate_exit must be 3, never 0 (false PASS)"
+        );
         assert!(rec.rows.is_empty(), "aborted record must have no gate rows");
         let reason = rec.abort_reason.as_deref().unwrap_or("");
         assert!(
