@@ -1,5 +1,10 @@
 # abproof
 
+[![CI](https://github.com/Barnett-Studios/abproof/actions/workflows/ci.yml/badge.svg)](https://github.com/Barnett-Studios/abproof/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/abproof)](https://crates.io/crates/abproof)
+[![Downloads](https://img.shields.io/crates/d/abproof)](https://crates.io/crates/abproof)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 **Offline A/B change-validation for an agentic coding harness — stat-gated, seed-blocked,
 reusing the executor as the arm.**
 
@@ -13,6 +18,14 @@ Unlike a prompt-eval framework, abproof A/Bs the **whole assembly running a real
 single model call — the executor is the arm.
 
 > Part of the Barnett Studios agentic-harness toolkit → cxpak · commitward · **abproof** · …
+
+## Install
+
+```sh
+brew tap Barnett-Studios/tap && brew install abproof   # macOS/Linux
+cargo install abproof                                   # any platform
+docker run --rm -v "$PWD:/repo" ghcr.io/barnett-studios/abproof run experiment.yaml --dry-run
+```
 
 ## Run
 
@@ -59,3 +72,18 @@ it is offline, never in the live agent loop; "absent abproof" simply means the h
 unmeasured.)
 
 See [`CONTRACT.md`](CONTRACT.md) for the full interface.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
+Unless you explicitly state otherwise, any contribution you intentionally submit for
+inclusion in the work shall be dual-licensed as above, without any additional terms.
+
+---
+
+Built by [Barnett Studios](https://barnett-studios.com/) — part of the agentic-harness
+toolkit: [cxpak](https://github.com/Barnett-Studios/cxpak) ·
+[commitward](https://github.com/Barnett-Studios/commitward) ·
+[cascadr](https://github.com/Barnett-Studios/cascadr) · **abproof** ·
+[cordon](https://github.com/Barnett-Studios/cordon) ·
+[planner](https://github.com/Barnett-Studios/planner).
