@@ -1,0 +1,6 @@
+{
+  "name": "cxpak-context-ab",
+  "gated": {
+    "node_pass_rate": 0.70
+  }
+}

@@ -1,0 +1,20 @@
+name: cxpak-context-ab
+reps: 30
+seed_base: 1
+battery:
+  - node-suite-a
+  - node-suite-b
+baseline:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: none
+treatment:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: cxpak
+metrics:
+  node_pass_rate: gated
+  judge_quality: tracked
+  engine_broken_rate: tracked
+tolerance:
+  node_pass_rate: 0.0

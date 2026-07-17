@@ -1,0 +1,14 @@
+name: zero-reps
+reps: 0
+battery:
+  - suite-a
+baseline:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: none
+treatment:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: cxpak
+metrics:
+  node_pass_rate: gated

@@ -1,0 +1,19 @@
+name: cross-loop-valid
+reps: 5
+seed_base: 1
+battery:
+  - py-add
+baseline:
+  loop: execute-node
+  model: local-default
+  context: none
+  backend: local
+treatment:
+  loop: execute-node
+  model: claude-haiku-4-5
+  context: none
+  backend: claude-cli
+metrics:
+  node_pass_rate: gated
+tolerance:
+  node_pass_rate: 0.0

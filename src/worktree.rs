@@ -1,0 +1,216 @@
+//! Node work-tree provisioner.
+//!
+//! `execute_node.py` requires `EXECUTE_NODE_ROOT` to point at a **clean git repo**
+//! containing the RED stub file(s) and the acceptance test; it aborts
+//! `FAILURE(dirty_tree)` otherwise. Nothing in the harness materialized such a tree
+//! from a corpus node — so every real run reached the model on zero nodes. This
+//! module builds that tree: a fresh temp repo with one clean baseline commit, torn
+//! down on drop.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static WT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// The complete RED project to materialize into a node's work tree: every seed
+/// file by relative path — the stub source(s) the model must fix, the acceptance
+/// test(s), and any scaffold (`Cargo.toml`, `go.mod`, `src/` layout). Carried
+/// in-memory on [`crate::corpus::NodeJson`] (`#[serde(skip)]`) — never part of the
+/// JSON contract `execute_node.py` reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterializeSpec {
+    /// `(relative path, content)` for every file in the seed project.
+    pub files: Vec<(String, String)>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorktreeError {
+    #[error("worktree io: {0}")]
+    Io(String),
+    #[error("worktree git: {0}")]
+    Git(String),
+}
+
+/// An owned, isolated git work tree holding a node's RED baseline. The directory is
+/// removed on drop (best-effort) on every path, including panics and early returns.
+pub struct NodeWorkspace {
+    root: PathBuf,
+}
+
+impl NodeWorkspace {
+    /// Materialize `spec` into a fresh temp git repo with a single clean commit.
+    ///
+    /// Hooks are disabled in the repo (`core.hooksPath` → a non-directory) so the
+    /// global HITL commit-msg hook never fires on these internal fixture commits —
+    /// and so `execute_node.py`'s own success commit stays hook-free too.
+    pub fn create(spec: &MaterializeSpec) -> Result<NodeWorkspace, WorktreeError> {
+        let n = WT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("dotclaude-wt-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&root)
+            .map_err(|e| WorktreeError::Io(format!("create {}: {e}", root.display())))?;
+        // Guard is live from here: any `?` below removes the dir on drop.
+        let ws = NodeWorkspace { root };
+        ws.init_repo()?;
+        ws.write_files(spec)?;
+        ws.commit_baseline()?;
+        ws.assert_clean()?;
+        Ok(ws)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn git(&self, args: &[&str]) -> Result<(), WorktreeError> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(args)
+            .output()
+            .map_err(|e| WorktreeError::Io(format!("spawn git {}: {e}", args.join(" "))))?;
+        if !out.status.success() {
+            return Err(WorktreeError::Git(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
+    fn init_repo(&self) -> Result<(), WorktreeError> {
+        self.git(&["init", "-q"])?;
+        self.git(&["config", "user.email", "harness@dotclaude.local"])?;
+        self.git(&["config", "user.name", "dotclaude-harness"])?;
+        self.git(&["config", "commit.gpgsign", "false"])?;
+        // /dev/null is not a directory: git finds no hooks there, so none run.
+        self.git(&["config", "core.hooksPath", "/dev/null"])?;
+        Ok(())
+    }
+
+    fn write_files(&self, spec: &MaterializeSpec) -> Result<(), WorktreeError> {
+        for (rel, content) in &spec.files {
+            self.write_one(rel, content)?;
+        }
+        Ok(())
+    }
+
+    fn write_one(&self, rel: &str, content: &str) -> Result<(), WorktreeError> {
+        let target = self.root.join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| WorktreeError::Io(format!("mkdir {}: {e}", parent.display())))?;
+        }
+        std::fs::write(&target, content)
+            .map_err(|e| WorktreeError::Io(format!("write {}: {e}", target.display())))
+    }
+
+    fn commit_baseline(&self) -> Result<(), WorktreeError> {
+        self.git(&["add", "-A"])?;
+        self.git(&["commit", "-q", "-m", "red baseline"])
+    }
+
+    fn assert_clean(&self) -> Result<(), WorktreeError> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["status", "--porcelain"])
+            .output()
+            .map_err(|e| WorktreeError::Io(format!("git status: {e}")))?;
+        if !out.status.success() {
+            return Err(WorktreeError::Git("git status failed".into()));
+        }
+        if !out.stdout.is_empty() {
+            return Err(WorktreeError::Git(format!(
+                "work tree not clean after baseline commit: {}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for NodeWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> MaterializeSpec {
+        MaterializeSpec {
+            files: vec![
+                (
+                    "calc.py".into(),
+                    "def add(a, b):\n    raise NotImplementedError\n".into(),
+                ),
+                (
+                    "acceptance_test.py".into(),
+                    "from calc import add\nassert add(2, 3) == 5\n".into(),
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn create_materializes_clean_red_tree() {
+        let ws = NodeWorkspace::create(&spec()).expect("materialize");
+        assert!(ws.root().join("calc.py").exists(), "stub file must exist");
+        assert!(
+            ws.root().join("acceptance_test.py").exists(),
+            "acceptance test must exist"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.root().join("calc.py")).unwrap(),
+            "def add(a, b):\n    raise NotImplementedError\n",
+            "stub content must be written verbatim"
+        );
+        // Clean tree: `git status --porcelain` is empty (execute_node.py's precondition).
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(ws.root())
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(
+            status.stdout.is_empty(),
+            "tree must be clean after baseline commit"
+        );
+        // Exactly one commit on HEAD.
+        let count = Command::new("git")
+            .arg("-C")
+            .arg(ws.root())
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "1");
+    }
+
+    #[test]
+    fn create_writes_nested_paths() {
+        let s = MaterializeSpec {
+            files: vec![
+                ("pkg/mod.py".into(), "x = 1\n".into()),
+                ("acceptance_test.py".into(), "print('ok')\n".into()),
+            ],
+        };
+        let ws = NodeWorkspace::create(&s).expect("materialize nested");
+        assert!(
+            ws.root().join("pkg/mod.py").exists(),
+            "nested file's parent dirs must be created"
+        );
+    }
+
+    #[test]
+    fn drop_removes_the_directory() {
+        let root = {
+            let ws = NodeWorkspace::create(&spec()).expect("materialize");
+            ws.root().to_path_buf()
+        };
+        assert!(!root.exists(), "workspace dir must be removed on drop");
+    }
+}

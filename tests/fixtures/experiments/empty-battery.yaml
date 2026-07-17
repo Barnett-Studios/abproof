@@ -1,0 +1,13 @@
+name: empty-battery
+reps: 10
+battery: []
+baseline:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: none
+treatment:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: cxpak
+metrics:
+  node_pass_rate: gated

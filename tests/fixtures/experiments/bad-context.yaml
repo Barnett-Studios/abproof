@@ -1,0 +1,14 @@
+name: bad-context
+reps: 10
+battery:
+  - suite-a
+baseline:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: hybrid
+treatment:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: cxpak
+metrics:
+  node_pass_rate: gated

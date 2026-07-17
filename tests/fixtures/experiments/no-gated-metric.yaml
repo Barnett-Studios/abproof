@@ -1,0 +1,15 @@
+name: no-gated
+reps: 10
+battery:
+  - suite-a
+baseline:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: none
+treatment:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: cxpak
+metrics:
+  node_pass_rate: tracked
+  judge_quality: tracked

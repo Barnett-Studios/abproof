@@ -1,0 +1,14 @@
+name: cross-loop-no-model
+reps: 1
+battery: [py-add]
+baseline:
+  loop: execute-node
+  model: local-default
+  context: none
+treatment:
+  loop: execute-node
+  model: ""
+  context: none
+  backend: claude-cli
+metrics:
+  node_pass_rate: gated

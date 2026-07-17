@@ -1,0 +1,24 @@
+[package]
+name = "abproof"
+version = "0.1.0"
+edition = "2021"
+description = "Offline A/B change-validation harness — stat-gated, seed-blocked, reuses the executor as the arm"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Barnett-Studios/abproof"
+
+[lib]
+name = "abproof"
+path = "src/lib.rs"
+
+[[bin]]
+name = "abproof"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde_yaml = "0.9"
+indexmap = { version = "2", features = ["serde"] }
+once_cell = "1"
+thiserror = "1"
