@@ -97,6 +97,19 @@ impl NodeWorkspace {
     }
 
     fn write_one(&self, rel: &str, content: &str) -> Result<(), WorktreeError> {
+        // Defense-in-depth: MaterializeSpec::files is a public field, so an external
+        // caller of this library crate could hand us a path that escapes the work tree.
+        // Reject absolute paths and any `..` component before joining onto root.
+        let rel_path = std::path::Path::new(rel);
+        if rel_path.is_absolute()
+            || rel_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(WorktreeError::Io(format!(
+                "unsafe materialize path '{rel}' (absolute or contains '..') — refused"
+            )));
+        }
         let target = self.root.join(rel);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
@@ -203,6 +216,24 @@ mod tests {
             ws.root().join("pkg/mod.py").exists(),
             "nested file's parent dirs must be created"
         );
+    }
+
+    #[test]
+    fn create_rejects_path_traversal_in_materialize_spec() {
+        // MaterializeSpec::files is public; a `..` component must be refused, not written
+        // outside the work tree.
+        for bad in ["../escape.py", "pkg/../../escape.py", "/abs/escape.py"] {
+            let s = MaterializeSpec {
+                files: vec![(bad.into(), "x = 1\n".into())],
+            };
+            let err = NodeWorkspace::create(&s)
+                .err()
+                .unwrap_or_else(|| panic!("path '{bad}' must be refused, not materialized"));
+            assert!(
+                matches!(err, WorktreeError::Io(m) if m.contains("unsafe materialize path")),
+                "traversal path '{bad}' must fail with the unsafe-path error"
+            );
+        }
     }
 
     #[test]

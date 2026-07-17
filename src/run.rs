@@ -507,6 +507,37 @@ pub fn run_experiment(
 
     // ── gate verdicts ────────────────────────────────────────────────────────
     let verdicts = score::gate(manifest, baseline, &treatment_agg);
+
+    // Measurement-integrity guard: every manifest-declared gated metric MUST yield a
+    // verdict. A gated metric absent from the baseline JSON (stale / typo'd / renamed
+    // key) or otherwise unobservable is silently dropped by `score::gate`'s filter_map,
+    // which would leave `exit_code(&verdicts) == 0` (PASS) for a comparison that never
+    // happened — the exact false PASS the fail-loud contract forbids. Treat it as a
+    // setup fault (exit 3) naming the missing metric, not a passing gate.
+    let gated = manifest.gated_metrics();
+    if verdicts.len() != gated.len() {
+        let evaluated: std::collections::HashSet<&str> =
+            verdicts.iter().map(|v| v.metric.as_str()).collect();
+        let missing: Vec<&str> = gated
+            .iter()
+            .copied()
+            .filter(|m| !evaluated.contains(m))
+            .collect();
+        return abort_record(
+            manifest,
+            &format!(
+                "gated metric(s) {missing:?} produced no verdict \
+                 (absent from baseline or not observable) — refusing to report a PASS"
+            ),
+            cum_cost,
+            baseline_cost,
+            treatment_cost,
+            total_claude_calls,
+            validity_warnings,
+            inconclusive_pairs,
+            inconclusive_fraction,
+        );
+    }
     let gate_exit = score::exit_code(&verdicts);
 
     // ── build result rows ────────────────────────────────────────────────────
@@ -1301,6 +1332,35 @@ mod tests {
         assert!(
             !rec.seeds_honoured,
             "treatment arm ran greedy (seed not honoured) — record must report false"
+        );
+    }
+
+    #[test]
+    fn missing_gated_metric_in_baseline_aborts_not_false_pass() {
+        // A gated metric (node_pass_rate) absent from the baseline JSON must abort as a
+        // setup fault (exit 3) naming the metric — NOT silently yield gate_exit 0, which
+        // would report a PASS for a comparison that never ran (the false-PASS hole).
+        let stub = scripted_stub(&[("a", driver::RunStatus::Success, Some(0.0_f64), 0)]);
+        let m = manifest_n_nodes(&["a"]);
+        let nodes = vec![make_node("a")];
+        let opts = RunOptions { max_cost: None };
+        let empty_baseline = score::Baseline {
+            name: "missing-gated".into(),
+            gated: BTreeMap::new(), // no node_pass_rate entry
+        };
+
+        let rec = run_experiment(&m, &nodes, &stub, &zero_judge(), &empty_baseline, &opts);
+
+        assert!(
+            rec.aborted,
+            "a gated metric missing from the baseline must abort, not fabricate a pass"
+        );
+        assert_eq!(rec.gate_exit, 3, "aborted → gate_exit must be 3, never 0 (false PASS)");
+        assert!(rec.rows.is_empty(), "aborted record must have no gate rows");
+        let reason = rec.abort_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("node_pass_rate"),
+            "abort reason must name the missing gated metric, got: {reason}"
         );
     }
 
