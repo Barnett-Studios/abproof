@@ -1,6 +1,6 @@
 [package]
 name = "abproof"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Offline A/B change-validation harness — stat-gated, seed-blocked, reuses the executor as the arm"
 license = "MIT OR Apache-2.0"
