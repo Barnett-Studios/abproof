@@ -324,6 +324,14 @@ mod tests {
     use crate::experiment::{Backend, ContextStrategy};
     use std::collections::BTreeMap;
 
+    /// Corpus root for the UNIT tests: a vendored, self-contained 2-node fixture
+    /// (`py-add`, `cpp-all-your-base`) so `cargo test` runs standalone, decoupled from
+    /// the full corpus. The production resolver `fixture_root()` (ABPROOF_CORPUS /
+    /// walk-up) is what real `abproof run` invocations use.
+    fn fixture_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus-fixture/red-baseline")
+    }
+
     fn none_arm() -> ArmConfig {
         ArmConfig {
             loop_name: "execute-node".into(),
@@ -346,7 +354,7 @@ mod tests {
 
     #[test]
     fn loads_py_add_node() {
-        let n = load_node(&red_baseline_root().join("py-add")).expect("load");
+        let n = load_node(&fixture_root().join("py-add")).expect("load");
         assert_eq!(n.meta.id, "py-add");
         assert_eq!(n.meta.files, vec!["calc.py"]);
         assert!(
@@ -364,7 +372,7 @@ mod tests {
 
     #[test]
     fn bridge_none_omits_context() {
-        let n = load_node(&red_baseline_root().join("py-add")).unwrap();
+        let n = load_node(&fixture_root().join("py-add")).unwrap();
         let j = bridge_node(&n, &none_arm());
         assert_eq!(j.id, "py-add");
         assert_eq!(j.files, vec!["calc.py"]);
@@ -377,7 +385,7 @@ mod tests {
 
     #[test]
     fn bridge_cxpak_injects_context() {
-        let n = load_node(&red_baseline_root().join("py-add")).unwrap();
+        let n = load_node(&fixture_root().join("py-add")).unwrap();
         let j = bridge_node(&n, &cxpak_arm());
         assert!(
             j.change.contains("## Context"),
@@ -401,7 +409,7 @@ mod tests {
             #[serde(default)]
             forbid: Vec<String>,
         }
-        let n = load_node(&red_baseline_root().join("py-add")).unwrap();
+        let n = load_node(&fixture_root().join("py-add")).unwrap();
         let wire = serde_json::to_string(&bridge_node(&n, &none_arm())).unwrap();
         let read: ExecNodeReads = serde_json::from_str(&wire).expect("execute_node.py schema");
         assert_eq!(read.id, n.meta.id);
@@ -413,7 +421,7 @@ mod tests {
 
     #[test]
     fn load_battery_exact_name() {
-        let root = red_baseline_root();
+        let root = fixture_root();
         let patterns = vec!["py-add".to_string()];
         let nodes = load_battery(&root, &patterns).expect("battery");
         assert_eq!(nodes.len(), 1);
@@ -422,7 +430,7 @@ mod tests {
 
     #[test]
     fn load_battery_empty_glob_errors() {
-        let root = red_baseline_root();
+        let root = fixture_root();
         let patterns = vec!["nonexistent-node".to_string()];
         let err = load_battery(&root, &patterns).unwrap_err();
         assert!(matches!(err, CorpusError::EmptyGlob(_, _)));
@@ -430,7 +438,7 @@ mod tests {
 
     #[test]
     fn forbid_skipped_when_empty() {
-        let n = load_node(&red_baseline_root().join("py-add")).unwrap();
+        let n = load_node(&fixture_root().join("py-add")).unwrap();
         let j = bridge_node(&n, &none_arm());
         let wire = serde_json::to_string(&j).unwrap();
         // skip_serializing_if = Vec::is_empty → "forbid" key absent from JSON
@@ -443,7 +451,7 @@ mod tests {
     #[test]
     fn requires_deserialises_from_meta_yaml() {
         // cpp nodes carry `requires: ["cmake"]`; this must land on NodeMeta.requires.
-        let n = load_node(&red_baseline_root().join("cpp-all-your-base")).expect("load cpp node");
+        let n = load_node(&fixture_root().join("cpp-all-your-base")).expect("load cpp node");
         assert_eq!(
             n.meta.requires,
             vec!["cmake"],
@@ -451,7 +459,7 @@ mod tests {
         );
 
         // py-add has no requires field in meta.yaml → defaults to empty vec.
-        let py = load_node(&red_baseline_root().join("py-add")).expect("load py node");
+        let py = load_node(&fixture_root().join("py-add")).expect("load py node");
         assert!(
             py.meta.requires.is_empty(),
             "py node with no requires field must default to empty vec"
@@ -461,7 +469,7 @@ mod tests {
     #[test]
     fn requires_threaded_to_node_json_and_not_serialised() {
         // bridge_node must copy requires onto NodeJson.
-        let n = load_node(&red_baseline_root().join("cpp-all-your-base")).expect("load");
+        let n = load_node(&fixture_root().join("cpp-all-your-base")).expect("load");
         let j = bridge_node(&n, &none_arm());
         assert_eq!(j.requires, vec!["cmake"], "bridge_node must copy requires");
 

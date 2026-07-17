@@ -87,6 +87,13 @@ fn execute_node_script() -> PathBuf {
     execute_node_path()
 }
 
+/// The execute-node loop is the Executor component — absent when abproof is built
+/// standalone (only present inside a full harness checkout). These contract tests
+/// shell it, so they skip cleanly when it is not on disk.
+fn loop_available() -> bool {
+    execute_node_path().is_file()
+}
+
 // ---------------------------------------------------------------------------
 // Contract test 1: success path via mock
 // ---------------------------------------------------------------------------
@@ -95,6 +102,10 @@ fn execute_node_script() -> PathBuf {
 fn local_node_driver_fills_stub_via_mock() {
     // Requires python3 + git on PATH. Deterministic: EXECUTE_NODE_MOCK hands
     // execute_node.py a canned SEARCH/REPLACE block, so no local LLM is needed.
+    if !loop_available() {
+        eprintln!("skip: execute-node loop (Executor) absent — standalone build");
+        return;
+    }
     let repo = TempDir::new("lnd-ok");
     git_init(repo.path());
 
@@ -170,6 +181,10 @@ fn local_node_driver_timeout_scores_inconclusive() {
     // the model is even called; driver returns Inconclusive (a wall-clock
     // kill with no gradable completion, ADR-0042 timeout-collapse), never
     // propagates Err.
+    if !loop_available() {
+        eprintln!("skip: execute-node loop (Executor) absent — standalone build");
+        return;
+    }
     let repo = TempDir::new("lnd-timeout");
     git_init(repo.path());
 

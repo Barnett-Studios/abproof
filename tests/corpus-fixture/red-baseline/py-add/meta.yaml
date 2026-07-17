@@ -1,0 +1,4 @@
+id: py-add
+language: python
+files: ["calc.py"]
+accept: "python3 acceptance_test.py"

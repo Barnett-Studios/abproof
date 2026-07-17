@@ -67,6 +67,14 @@ fn execute_node_script() -> std::path::PathBuf {
     execute_node_path()
 }
 
+/// Skip guard for tests that shell the execute-node loop (the Executor component): the
+/// loop is present in-workspace but absent in a standalone `abproof` checkout, so these
+/// cross-component integration tests skip cleanly there rather than fail. Set
+/// `$ABPROOF_EXECUTE_NODE` to run them against a loop outside a checkout.
+fn loop_available() -> bool {
+    execute_node_path().is_file()
+}
+
 fn write_fake_claude(bin_dir: &std::path::Path, canned_json: &str) {
     use std::os::unix::fs::PermissionsExt;
     let script = bin_dir.join("claude");
@@ -197,6 +205,10 @@ fn child_env_sets_llm_backend_local_for_local_arm() {
 fn claude_cli_backend_fills_stub_via_fake_claude() {
     // Requires python3 + git on PATH. Deterministic via fake claude binary.
     // NO EXECUTE_NODE_MOCK — the real claude-cli backend path is exercised.
+    if !loop_available() {
+        eprintln!("skip: execute-node loop not found (standalone abproof; needs the Executor)");
+        return;
+    }
     let repo = TempDir::new("ccdrv-repo");
     let bin_dir = TempDir::new("ccdrv-bin");
 
@@ -277,8 +289,15 @@ fn claude_cli_backend_fills_stub_via_fake_claude() {
 /// cost); requires python3 + git on PATH.
 #[test]
 fn local_driver_materializes_worktree_and_succeeds_via_mock() {
-    let node = abproof::corpus::load_node(&abproof::corpus::red_baseline_root().join("py-add"))
-        .expect("py-add corpus node must load");
+    if !loop_available() {
+        eprintln!("skip: execute-node loop not found (standalone abproof; needs the Executor)");
+        return;
+    }
+    let node = abproof::corpus::load_node(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus-fixture/red-baseline/py-add"),
+    )
+    .expect("py-add corpus node must load");
 
     // Mock model response: a SEARCH/REPLACE block that fixes calc.py's stub.
     let mock = TempDir::new("mock");

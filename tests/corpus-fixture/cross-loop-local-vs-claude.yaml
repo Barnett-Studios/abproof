@@ -1,0 +1,19 @@
+name: cross-loop-local-vs-claude
+reps: 3
+seed_base: 1
+battery:
+  - py-add
+baseline:
+  loop: execute-node
+  model: local-default
+  context: none
+  backend: local
+treatment:
+  loop: execute-node
+  model: claude-sonnet-4-6
+  context: none
+  backend: claude-cli
+metrics:
+  node_pass_rate: gated
+tolerance:
+  node_pass_rate: 0.0

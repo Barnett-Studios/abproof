@@ -129,10 +129,17 @@ fn canned_judge() -> StubJudge {
     }
 }
 
+/// The vendored 2-node fixture ships inside the crate, so these pipeline tests run
+/// standalone without the full ~23MB `measurement/corpus` (which is the Corpus
+/// component's repo, absent from an abproof-only checkout).
+fn fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus-fixture/red-baseline")
+}
+
 fn load_py_add() -> Vec<abproof::corpus::CorpusNode> {
-    let root = corpus::red_baseline_root();
+    let root = fixture_root();
     corpus::load_battery(&root, &["py-add".to_string()])
-        .expect("py-add must be loadable from the committed corpus")
+        .expect("py-add must be loadable from the vendored corpus fixture")
 }
 
 // ── Existing test ─────────────────────────────────────────────────────────────
@@ -405,12 +412,12 @@ fn run_experiment_emits_judge_quality_row_when_declared_and_judge_has_data() {
 
 #[test]
 fn cross_loop_manifest_parses_and_validates() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    // Vendored alongside the corpus fixture so the parse/validate contract runs
+    // standalone (the live manifest lives in the measurement component's repo).
+    let path = fixture_root()
         .parent()
         .unwrap()
-        .parent()
-        .unwrap()
-        .join("measurement/experiments/cross-loop-local-vs-claude.yaml");
+        .join("cross-loop-local-vs-claude.yaml");
     let m = load_manifest(&path).expect("parse cross-loop manifest");
     m.validate().expect("cross-loop manifest must be valid");
     assert!(m.is_cross_loop(), "must be flagged as cross-loop");

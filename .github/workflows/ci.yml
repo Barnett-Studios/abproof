@@ -29,5 +29,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: test (unit; corpus/loop-driven tests need $ABPROOF_CORPUS + $ABPROOF_EXECUTE_NODE)
-        run: cargo test
+      # Corpus tests run against the vendored 2-node fixture; loop-driven contract
+      # tests self-skip when the execute-node loop (the Executor component) is absent.
+      # A full-harness checkout can still exercise them via $ABPROOF_EXECUTE_NODE.
+      - name: test
+        run: cargo test --locked

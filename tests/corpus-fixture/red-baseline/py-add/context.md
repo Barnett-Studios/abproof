@@ -1,0 +1,1 @@
+Module `calc.py` lives at the root of the node working directory. It exports a single public function `add(a, b)` that must return the arithmetic sum of two numbers. No imports are needed. The acceptance test imports `add` directly via `from calc import add` and asserts `add(2, 3) == 5` and `add(-1, 1) == 0`.
