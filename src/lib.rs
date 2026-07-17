@@ -1,5 +1,5 @@
-//! dotclaude-measure — offline A/B change-validation harness (v1, same-loop-local).
-//! One-way dependency on dotclaude-core; the engine never sees this crate.
+//! abproof — offline A/B change-validation harness: stat-gated, seed-blocked, reuses the
+//! executor as the measured arm. Standalone; no dependency on any harness engine crate.
 pub mod corpus;
 pub mod driver;
 pub mod env_filter;

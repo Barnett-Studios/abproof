@@ -37,13 +37,14 @@ abproof run experiment.yaml --dry-run
 abproof run experiment.yaml --confirm --max-cost 5.00 --max-calls 200
 ```
 
-abproof needs two things at run time, resolved by env (or walked up from the CWD in a checkout):
+abproof needs two things at run time. A **standalone install sets these via env**; an in-tree/dev
+checkout resolves them by walking up from the CWD.
 
-| Env | What | Default |
+| Env | What | Resolution |
 |---|---|---|
-| `ABPROOF_CORPUS` | the RED-baseline corpus dir | walk up for `measurement/corpus/red-baseline` |
-| `ABPROOF_EXECUTE_NODE` | the execute-node loop (`execute_node.py`) | walk up for `skills/execute-node/execute_node.py` |
-| `ABPROOF_RESULTS` | where `--out`-less results are written | `./measurement/experiments` |
+| `ABPROOF_CORPUS` | the RED-baseline corpus dir | standalone: point at the [corpus](https://github.com/Barnett-Studios/corpus) repo's `red-baseline/`; dev checkout: walked up as `measurement/corpus/red-baseline` |
+| `ABPROOF_EXECUTE_NODE` | the execute-node loop (`execute_node.py`) | standalone: your executor's `execute_node.py`; dev checkout: walked up as `skills/execute-node/execute_node.py` |
+| `ABPROOF_RESULTS` | where `--out`-less results are written | `./measurement/experiments` (any writable dir) |
 
 The corpus is a **separate component** (the *Corpus* slot) — abproof ships none. The reference
 RED-baseline corpus is Exercism-derived and must be license-scrubbed + attributed before
