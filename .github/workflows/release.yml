@@ -38,6 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: resolve toolchain
         id: rust
+        shell: bash   # windows-latest defaults to pwsh, where sed/$GITHUB_OUTPUT don't work
         run: echo "channel=$(sed -n 's/^channel = \"\(.*\)\"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
       # Pin to the rust-toolchain.toml channel AND add the cross target to THAT
       # toolchain — @stable would add the target to stable while cargo (driven by
@@ -158,6 +159,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: resolve toolchain
         id: rust
+        shell: bash   # windows-latest defaults to pwsh, where sed/$GITHUB_OUTPUT don't work
         run: echo "channel=$(sed -n 's/^channel = \"\(.*\)\"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-06-30
         with:
