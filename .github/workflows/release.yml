@@ -1,35 +1,222 @@
 name: Release
+
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'        # release: publish to crates.io
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'      # prerelease: build/verify only, no publish
+      - 'v[0-9]+.[0-9]+.[0-9]+'        # release: full pipeline (binaries + image + crates.io + brew)
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'      # prerelease (e.g. -rc.1): binaries + image only
+
 permissions:
   contents: read
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  publish:
-    name: publish
-    # crates.io publish only on a final release tag; prereleases just verify the build.
+  build:
+    strategy:
+      fail-fast: false   # one target failing shouldn't cancel/mask the others
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../abproof-${{ matrix.target }}.tar.gz abproof
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/abproof.exe -DestinationPath abproof-${{ matrix.target }}.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: abproof-${{ matrix.target }}
+          path: abproof-${{ matrix.target }}.*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: artifacts/*
+
+  docker:
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # cosign keyless signing via GitHub OIDC
     steps:
-      # Actions pinned to commit SHAs (never @vN — tags are mutable).
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@v4
+      - name: Compute lowercase image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
-      - name: resolve toolchain
-        id: rust
-        run: echo "channel=$(sed -n 's/^channel = \"\(.*\)\"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-06-30
+          path: artifacts
+          merge-multiple: true
+      - name: Stage per-arch binaries for Dockerfile.dist
+        run: |
+          mkdir -p dist/linux/amd64 dist/linux/arm64
+          tar -xzf artifacts/abproof-x86_64-unknown-linux-gnu.tar.gz -C dist/linux/amd64/
+          tar -xzf artifacts/abproof-aarch64-unknown-linux-gnu.tar.gz -C dist/linux/arm64/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          toolchain: ${{ steps.rust.outputs.channel }}
-      - name: verify build (always)
-        run: cargo publish --locked --dry-run
-      - name: publish to crates.io (final release tags only)
-        if: ${{ !contains(github.ref_name, '-') }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata (tags + OCI labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      # COPY-only Dockerfile.dist needs no QEMU: buildx assembles the manifest
+      # from the prebuilt per-arch binaries.
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dist
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+  publish:
+    needs: build
+    if: ${{ !contains(github.ref_name, '-') }}   # skip crates.io on prerelease tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  update-homebrew:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}   # skip Homebrew tap on prerelease tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_LINUX_X86=$(sha256sum artifacts/abproof-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM=$(sha256sum artifacts/abproof-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+          SHA_MAC_X86=$(sha256sum artifacts/abproof-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_MAC_ARM=$(sha256sum artifacts/abproof-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Barnett-Studios/homebrew-tap.git" tap
+          cd tap
+          mkdir -p Formula
+          cat > Formula/abproof.rb << 'RUBY'
+          class Abproof < Formula
+            desc "Offline A/B change-validation harness for coding agents"
+            homepage "https://github.com/Barnett-Studios/abproof"
+          RUBY
+          cat >> Formula/abproof.rb << EOF
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/Barnett-Studios/abproof/releases/download/v${VERSION}/abproof-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_ARM}"
+              else
+                url "https://github.com/Barnett-Studios/abproof/releases/download/v${VERSION}/abproof-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_X86}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/Barnett-Studios/abproof/releases/download/v${VERSION}/abproof-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_ARM}"
+              else
+                url "https://github.com/Barnett-Studios/abproof/releases/download/v${VERSION}/abproof-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_X86}"
+              end
+            end
+
+            def install
+              bin.install "abproof"
+            end
+
+            test do
+              system "#{bin}/abproof", "--help"
+            end
+          end
+          EOF
+
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Formula/abproof.rb
+          git diff --cached --quiet || git commit -m "Update abproof to ${VERSION}"
+          git push
