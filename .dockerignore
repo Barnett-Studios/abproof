@@ -4,4 +4,3 @@ target/
 tests/
 docs/
 *.md
-dist/
