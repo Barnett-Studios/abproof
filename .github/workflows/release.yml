@@ -165,7 +165,16 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
       - name: Publish to crates.io
-        run: cargo publish --locked
+        # Idempotent: a re-run or re-tag of an already-published version is a
+        # no-op success, not a hard failure — so brew/artifact fixes can re-release.
+        run: |
+          if cargo publish --locked 2>publish.log; then
+            echo "published"
+          elif grep -qiE "already (exists|uploaded)|is already uploaded" publish.log; then
+            echo "already on crates.io — skipping"; cat publish.log
+          else
+            cat publish.log; exit 1
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -174,10 +183,14 @@ jobs:
     if: ${{ !contains(github.ref_name, '-') }}   # skip Homebrew tap on prerelease tags
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
+      - name: Download release binaries
+        # Only the abproof-* binary artifacts are needed for the formula shas;
+        # pulling *all* artifacts also fetched the buildx .dockerbuild/provenance
+        # blobs, one of which flaked the download ("failed after 5 retries").
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: abproof-*
           merge-multiple: true
       - name: Update Homebrew formula
         env:
