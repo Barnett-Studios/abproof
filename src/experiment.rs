@@ -53,6 +53,10 @@ pub struct Manifest {
     pub metrics: IndexMap<String, MetricTag>,
     #[serde(default)]
     pub tolerance: BTreeMap<String, f64>,
+    /// Significance level for the gated metric's paired Wilcoxon test
+    /// (CONTRACT.md amendment). `None` defers to [`crate::score::DEFAULT_GATE_ALPHA`].
+    #[serde(default)]
+    pub gate_alpha: Option<f64>,
 }
 
 fn default_reps() -> u32 {
@@ -110,6 +114,14 @@ impl Manifest {
                 return Err(ManifestError::Invalid(
                     self.name.clone(),
                     format!("tolerance key '{key}' is not a known metric"),
+                ));
+            }
+        }
+        if let Some(alpha) = self.gate_alpha {
+            if !(alpha > 0.0 && alpha < 1.0) {
+                return Err(ManifestError::Invalid(
+                    self.name.clone(),
+                    format!("gate_alpha must be in (0.0, 1.0), got {alpha}"),
                 ));
             }
         }
@@ -189,6 +201,41 @@ mod tests {
     fn rejects_tolerance_unknown_key() {
         let m = load_manifest(&fixture("tolerance-unknown-key.yaml")).unwrap();
         assert!(matches!(m.validate(), Err(ManifestError::Invalid(_, _))));
+    }
+
+    #[test]
+    fn gate_alpha_defaults_to_none() {
+        let m = load_manifest(&fixture("valid-same-loop.yaml")).unwrap();
+        assert_eq!(m.gate_alpha, None);
+    }
+
+    #[test]
+    fn rejects_gate_alpha_out_of_range() {
+        let m = load_manifest(&fixture("gate-alpha-out-of-range.yaml")).unwrap();
+        assert!(matches!(m.validate(), Err(ManifestError::Invalid(_, _))));
+    }
+
+    #[test]
+    fn accepts_gate_alpha_in_range() {
+        let yaml = r#"
+name: t
+reps: 1
+battery: [py-add]
+baseline:
+  loop: execute-node
+  model: local
+  context: none
+treatment:
+  loop: execute-node
+  model: local
+  context: none
+metrics:
+  node_pass_rate: gated
+gate_alpha: 0.10
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse inline yaml");
+        m.validate().expect("valid");
+        assert_eq!(m.gate_alpha, Some(0.10));
     }
 
     #[test]

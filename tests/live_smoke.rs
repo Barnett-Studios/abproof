@@ -46,6 +46,7 @@ fn live_one_node_battery_produces_wellformed_result() {
         },
         metrics,
         tolerance: BTreeMap::default(),
+        gate_alpha: None,
     };
 
     let corpus_root = corpus::red_baseline_root();

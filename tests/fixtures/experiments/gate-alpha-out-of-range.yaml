@@ -1,0 +1,15 @@
+name: bad-gate-alpha
+reps: 10
+battery:
+  - suite-a
+baseline:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: none
+treatment:
+  loop: execute-node
+  model: claude-opus-4-5
+  context: cxpak
+metrics:
+  node_pass_rate: gated
+gate_alpha: 1.5

@@ -107,6 +107,7 @@ fn small_manifest() -> Manifest {
         },
         metrics,
         tolerance: BTreeMap::default(),
+        gate_alpha: None,
     }
 }
 
@@ -356,6 +357,7 @@ fn run_experiment_omits_rows_for_un_wired_tracked_metrics() {
         },
         metrics,
         tolerance: BTreeMap::default(),
+        gate_alpha: None,
     };
 
     let nodes = load_py_add();

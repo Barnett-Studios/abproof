@@ -506,7 +506,15 @@ pub fn run_experiment(
     let ci = stats::bootstrap_median_ci(&deltas, BOOTSTRAP_B, BOOTSTRAP_SEED, BOOTSTRAP_ALPHA);
 
     // ── gate verdicts ────────────────────────────────────────────────────────
-    let verdicts = score::gate(manifest, baseline, &treatment_agg);
+    // CONTRACT.md amendment: the point-estimate regression on node_pass_rate is
+    // confirmed only when the paired Wilcoxon p-value also clears `alpha` —
+    // see `score::gate` for the honesty rationale.
+    let verdicts = score::gate(
+        manifest,
+        baseline,
+        &treatment_agg,
+        Some(wilcoxon.p_two_sided),
+    );
 
     // Measurement-integrity guard: every manifest-declared gated metric MUST yield a
     // verdict. A gated metric absent from the baseline JSON (stale / typo'd / renamed
@@ -833,6 +841,7 @@ mod tests {
             },
             metrics,
             tolerance: BTreeMap::default(),
+            gate_alpha: None,
         }
     }
 
@@ -964,6 +973,7 @@ mod tests {
             },
             metrics,
             tolerance: BTreeMap::default(),
+            gate_alpha: None,
         }
     }
 
@@ -994,6 +1004,7 @@ mod tests {
             },
             metrics,
             tolerance: BTreeMap::default(),
+            gate_alpha: None,
         }
     }
 
@@ -1152,6 +1163,7 @@ mod tests {
             },
             metrics,
             tolerance: BTreeMap::default(),
+            gate_alpha: None,
         }
     }
 

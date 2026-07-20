@@ -10,9 +10,11 @@ reusing the executor as the arm.**
 
 abproof answers one question: *did this change to your agent setup actually make it better?* It runs
 the **same executor** twice — baseline vs. treatment — over a corpus of RED-test-gated
-tasks, with seed-blocked pairing, task-typed scoring, and a statistical gate, and prints a
-PASS/FAIL verdict you can trust. It is the "better, proven" oracle the rest of the toolkit is
-measured against.
+tasks, with seed-blocked pairing, task-typed scoring, and a gate that only fails a run when the
+regression is both beyond tolerance and statistically significant (paired Wilcoxon, α = 0.05 by
+default) — not a bare point estimate. A worse-but-noisy result honestly exits PASS rather than
+failing on chance; an underpowered run is a validity problem for the *experiment* (raise `reps`),
+not something the gate silently papers over.
 
 Unlike a prompt-eval framework, abproof A/Bs the **whole assembly running a real loop**, not a
 single model call — the executor is the arm.

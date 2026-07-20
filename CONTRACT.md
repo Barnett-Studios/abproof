@@ -56,6 +56,23 @@ are **tracked**. Statistics are hand-rolled and non-verbatim (Pratt treatment of
 ties, gate-vs-track separation). A cross-loop manifest (local vs claude-cli) compares runtimes over
 the shared loop. Remote/infra failure maps to *abort*, never a measured 0.0.
 
+**The gate is significance-based, not a bare point estimate.** A worse observed value
+(`observed < baseline - tolerance`) only fails the run when it also clears statistical
+significance on the paired Wilcoxon signed-rank test over the gated metric's within-pair
+deltas:
+
+```
+worse     = observed_value < baseline_value - tolerance
+regressed = worse && p_two_sided < alpha        // alpha defaults to 0.05
+```
+
+`alpha` is `Manifest.gate_alpha` when set (validated to `(0.0, 1.0)`), else `0.05`. A metric
+with no paired-delta series to test (`p_two_sided: None`) falls back to the bare point-estimate
+rule. **Small-n consequence, stated honestly:** an underpowered run — too few paired reps to
+reach `p < alpha` even for a real effect — reports "not a confirmed regression" and exits 0.
+This is by design: the gate refuses to fail a run on a point estimate it cannot statistically
+back up. `reps` (default 30) is the lever for statistical power, not the gate rule.
+
 ## Compatibility
 
 Semver on the crate. The CLI (`run` + flags), the exit-code contract, and the manifest +
