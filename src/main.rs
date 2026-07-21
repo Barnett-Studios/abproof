@@ -4,13 +4,23 @@
 //! the arm. Fail-loud on infrastructure faults (unknown cost, aborted run) — a
 //! measurement must never present a misleading PASS.
 
+use std::io::Read;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: abproof run <manifest.yaml> \
-[--dry-run | --confirm] [--out <path>] [--max-cost <usd>] [--max-calls <n>]";
+[--dry-run | --confirm] [--out <path>] [--max-cost <usd>] [--max-calls <n>]\n\
+       abproof run-json   (ADR-0052 envelope: request on stdin, response on stdout)";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // `run-json`: the ADR-0052 response-envelope surface consumed by `dotclaude measure`
+    // via ComponentInvoker. Reads a request envelope on stdin, runs (or projects) the
+    // experiment, writes a `{schema_version, status, body}` envelope on stdout, exits 0 —
+    // the decision (and any abort) is carried in the envelope, never the exit code.
+    if args.len() >= 2 && args[1] == "run-json" {
+        std::process::exit(run_json_cli());
+    }
 
     // Bare `abproof` or unknown subcommand → usage, exit 0.
     if args.len() < 2 || args[1] != "run" {
@@ -160,6 +170,134 @@ fn main() {
     std::process::exit(record.gate_exit);
 }
 
+/// The `run-json` request: everything abproof needs to project or run an experiment, inlined.
+#[derive(serde::Deserialize)]
+struct RunRequest {
+    #[serde(default)]
+    manifest_yaml: String,
+    #[serde(default)]
+    baseline_json: Option<String>,
+    /// Project only (no arms executed) — needs no baseline, driver, or network.
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    max_cost: Option<f64>,
+    #[serde(default)]
+    max_calls: Option<u64>,
+}
+
+/// Read a request envelope from stdin, evaluate, print the response envelope. Returns the
+/// process exit code — always 0 on a well-formed request (the decision is in the body); 1 only
+/// on an unreadable stdin or a malformed request, so a broken call is never a false clean pass.
+fn run_json_cli() -> i32 {
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        println!("{}", error_envelope(&format!("failed to read stdin: {e}")));
+        return 1;
+    }
+    match run_json(&input) {
+        Ok(out) => {
+            println!("{out}");
+            0
+        }
+        Err(e) => {
+            println!("{}", error_envelope(&e));
+            1
+        }
+    }
+}
+
+fn run_json(input: &str) -> Result<String, String> {
+    let req: RunRequest =
+        serde_json::from_str(input).map_err(|e| format!("invalid run request JSON: {e}"))?;
+
+    let manifest: abproof::experiment::Manifest = serde_yaml::from_str(&req.manifest_yaml)
+        .map_err(|e| format!("manifest parse error: {e}"))?;
+    manifest
+        .validate()
+        .map_err(|e| format!("manifest invalid: {e}"))?;
+
+    let corpus_root = abproof::corpus::red_baseline_root();
+    let nodes = abproof::corpus::load_battery(&corpus_root, &manifest.battery)
+        .map_err(|e| format!("load battery: {e}"))?;
+
+    let judged_tasks = if manifest.tracked_metrics().contains(&"judge_quality") {
+        nodes.len()
+    } else {
+        0
+    };
+    let dry = abproof::run::project(&manifest, judged_tasks, manifest.reps);
+
+    // Dry-run: project only — needs no baseline, driver, or network.
+    if req.dry_run {
+        let body = serde_json::to_value(&dry).map_err(|e| format!("encode projection: {e}"))?;
+        return Ok(ok_envelope(
+            serde_json::json!({ "mode": "dry_run", "projection": body }),
+        ));
+    }
+
+    if let Some(cap) = req.max_calls {
+        if dry.projected_claude_calls > cap {
+            return Err(format!(
+                "projected claude-cli calls ({}) exceed max_calls ({cap})",
+                dry.projected_claude_calls
+            ));
+        }
+    }
+
+    let baseline_json = req
+        .baseline_json
+        .as_deref()
+        .ok_or("baseline_json is required for a confirmed run")?;
+    let baseline: abproof::score::Baseline =
+        serde_json::from_str(baseline_json).map_err(|e| format!("baseline parse error: {e}"))?;
+
+    let driver = abproof::driver::LocalNodeDriver {
+        script: execute_node_path(),
+        timeout: std::time::Duration::from_secs(300),
+    };
+    let judge = abproof::judge::StubJudge {
+        canned: abproof::judge::JudgeScore {
+            per_criterion: Default::default(),
+            total: 0,
+        },
+    };
+    let opts = abproof::run::RunOptions {
+        max_cost: req.max_cost,
+    };
+    let record = abproof::run::run_experiment(&manifest, &nodes, &driver, &judge, &baseline, &opts);
+
+    // An aborted experiment is an infra fault — a measurement that must never be trusted as a
+    // PASS. Signal it as `error` so the consumer falls open to its linked path (ADR-0052/0055)
+    // rather than emitting an `ok` envelope wrapping an invalid result.
+    if record.aborted {
+        return Err(format!(
+            "experiment aborted: {}",
+            record
+                .abort_reason
+                .as_deref()
+                .unwrap_or("local runtime unavailable")
+        ));
+    }
+
+    let body = serde_json::to_value(&record).map_err(|e| format!("encode result: {e}"))?;
+    Ok(ok_envelope(
+        serde_json::json!({ "mode": "run", "result": body }),
+    ))
+}
+
+/// An `ok`-status ADR-0052 envelope wrapping a computed body.
+fn ok_envelope(body: serde_json::Value) -> String {
+    serde_json::json!({ "schema_version": "1", "status": "ok", "body": body }).to_string()
+}
+
+/// An `error`-status ADR-0052 envelope. The consumer treats any non-`ok` status as a miss and
+/// falls open to its linked implementation.
+fn error_envelope(message: &str) -> String {
+    serde_json::json!({ "schema_version": "1", "status": "error", "body": { "message": message } })
+        .to_string()
+}
+
 fn print_projection(dry: &abproof::run::DryRun) {
     println!("dry-run projection:");
     println!("  loop_runs:              {}", dry.loop_runs);
@@ -211,4 +349,65 @@ fn die64(msg: &str) -> ! {
 fn die1(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod run_json_tests {
+    use super::*;
+
+    fn body_of(out: &str) -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_str(out).expect("envelope is JSON");
+        assert_eq!(v["schema_version"], "1");
+        v.clone()
+    }
+
+    const MANIFEST: &str = r#"
+name: t
+reps: 1
+battery: [py-add]
+baseline:
+  loop: execute-node
+  model: local
+  context: none
+treatment:
+  loop: execute-node
+  model: local
+  context: none
+metrics:
+  node_pass_rate: gated
+gate_alpha: 0.10
+"#;
+
+    #[test]
+    fn invalid_request_json_is_a_hard_error() {
+        assert!(run_json("not json").is_err());
+    }
+
+    #[test]
+    fn manifest_parse_error_is_reported() {
+        let req = serde_json::json!({ "manifest_yaml": "::: not a manifest :::" }).to_string();
+        assert!(run_json(&req).is_err());
+    }
+
+    #[test]
+    fn dry_run_emits_an_ok_projection_envelope() {
+        // Point the corpus resolver at the vendored fixture (py-add battery lives there).
+        std::env::set_var(
+            "ABPROOF_CORPUS",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/corpus-fixture/red-baseline"),
+        );
+        let req = serde_json::json!({ "manifest_yaml": MANIFEST, "dry_run": true }).to_string();
+        let out = run_json(&req).expect("dry-run projects");
+        std::env::remove_var("ABPROOF_CORPUS");
+
+        let v = body_of(&out);
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["body"]["mode"], "dry_run");
+        // The projection carries the loop-run count — proof the manifest+battery resolved.
+        assert!(
+            v["body"]["projection"]["loop_runs"].is_number(),
+            "projection body must carry loop_runs: {v}"
+        );
+    }
 }
