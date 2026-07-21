@@ -61,6 +61,7 @@ mod tests {
             claude_calls: 0,
             num_turns: 0,
             seeds_honoured: false,
+            provision_ms: 0,
         };
         let result = j
             .score(
