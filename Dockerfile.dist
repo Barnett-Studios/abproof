@@ -12,8 +12,12 @@
 #   docker build -f Dockerfile.dist -t abproof .
 #
 # ubuntu:24.04 matches the release builder (ubuntu-latest, glibc 2.39) and ships
-# libgcc-s1 by default; the binary is OpenSSL-free (rustls), so only
-# ca-certificates is needed for outbound TLS.
+# libgcc-s1 by default; the binary is OpenSSL-free (rustls), so ca-certificates
+# covers outbound TLS. git + python3 are the RUNTIME the measured arm needs: it
+# shells the execute-node loop (a git-driven Python script), so the published
+# measurement image must carry them — matching the dev Dockerfile. The loop and
+# corpus are still provided at run time via $ABPROOF_EXECUTE_NODE / $ABPROOF_CORPUS
+# (mount them); the loop uses only the Python stdlib, so python3 alone suffices.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
 LABEL org.opencontainers.image.source="https://github.com/Barnett-Studios/abproof" \
@@ -21,7 +25,7 @@ LABEL org.opencontainers.image.source="https://github.com/Barnett-Studios/abproo
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
+        ca-certificates git python3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home --user-group abproof
 
