@@ -23,9 +23,19 @@ more reps) but no longer fabricates independent observations. The delta vector l
 Order is fixed (nodes visited in battery order) so the bootstrap CI's pinned seed stays
 reproducible.
 
-The **point estimates** are unchanged: every node runs the same `reps`, so the grand mean over
-all `(node,rep)` cells equals the mean of per-node means. Only the delta *series* feeding the
-p-value / d_z / bootstrap changes.
+The reported **point estimates** (`node_pass_rate` per arm) stay the rep-weighted grand mean over
+all `(node,rep)` cells — a descriptive statistic. When no pair is excluded (every node runs the
+same `reps`) this exactly equals the node-weighted mean of per-node means, so the point estimate
+and the per-node significance test are the identical contrast. **Caveat (honest):** per-pair
+`Inconclusive`/`Skipped` exclusion (`run.rs:306–323`) can leave nodes with *unequal* gradable rep
+counts; then the reported grand mean is rep-weighted while the p-value / d_z / bootstrap are
+node-weighted. The two are no longer strictly identical, but the divergence is bounded by the
+fail-loud inconclusive floor (`INCONCLUSIVE_MAX_FRACTION`, default 0.20) that aborts any run
+excluding more than that fraction — and is zero in the common no-exclusion case. Both halves still describe the **same series** — in-run treatment vs. in-run baseline arm (the D3
+alignment); the residual is only a rep- vs. node-weighting nuance on that one series, bounded by
+the floor, not the two-different-references defect D3 fixes. We accept the reported metric as
+rep-weighted (matching what abproof has always displayed) rather than re-weight the descriptive
+statistic and make the gate compare numbers that differ from what the R-table shows.
 
 ## Decision D3 — both halves of the gate use the in-run baseline arm
 

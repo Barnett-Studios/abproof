@@ -200,7 +200,7 @@ pub fn wilcoxon_signed_rank(deltas: &[f64]) -> WilcoxonResult {
             method: WilcoxonMethod::ExactPratt,
         }
     } else {
-        let p = approx_wilcoxon_p(w_plus, n_nonzero, &nonzero_abs);
+        let p = approx_wilcoxon_p(w_plus, &nonzero_ranks);
         WilcoxonResult {
             w_plus,
             w_minus,
@@ -236,32 +236,28 @@ fn exact_wilcoxon_p(observed_w_plus: f64, nonzero_ranks: &[f64]) -> f64 {
     (count as f64 / total as f64).min(1.0)
 }
 
-/// Normal approximation with continuity correction and tie correction.
-fn approx_wilcoxon_p(w_plus: f64, n: usize, nonzero_abs: &[f64]) -> f64 {
-    let nf = n as f64;
-    let mu = nf * (nf + 1.0) / 4.0;
-
-    // Tie correction: sum over tie groups of non-zero |delta|.
-    let mut sorted_abs = nonzero_abs.to_vec();
-    sorted_abs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut tie_correction = 0.0_f64;
-    let mut i = 0;
-    while i < sorted_abs.len() {
-        let mut j = i + 1;
-        while j < sorted_abs.len()
-            && (sorted_abs[j] - sorted_abs[i]).abs() < f64::EPSILON * sorted_abs[i].abs().max(1.0)
-        {
-            j += 1;
-        }
-        let t = (j - i) as f64;
-        tie_correction += t * t * t - t;
-        i = j;
-    }
-
-    let base_var = nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0;
-    let sigma2 = base_var - tie_correction / 48.0;
-    let sigma = sigma2.max(0.0).sqrt();
+/// Normal approximation to the two-sided p-value, using the **sign-flip randomization
+/// moments** of W+.
+///
+/// Under the null "each non-zero delta is equally likely +/−", `W+ = Σ rᵢ·Bᵢ` with
+/// `Bᵢ ~ Bernoulli(½)` i.i.d. over the observed non-zero Pratt ranks `rᵢ`, so
+///
+/// ```text
+/// μ  = E[W+]   = Σ rᵢ / 2
+/// σ² = Var[W+] = Σ rᵢ² / 4
+/// ```
+///
+/// These are **exact for Pratt ranks with ties**: `Σrᵢ²/4` subsumes the separate
+/// tie-correction term, and using the actual `Σrᵢ` accounts for the zeros having consumed
+/// the low ranks. The prior `μ = n(n+1)/4`, `σ² = n(n+1)(2n+1)/24` are the *zero-free*
+/// moments — correct only when the ranks are exactly `1..n` (no zeros), which is precisely
+/// the case pass/fail deltas never satisfy. Matches
+/// `scipy.stats.wilcoxon(zero_method='pratt', correction=True, mode='approx')` to machine
+/// precision (issue #7; `tests/stats_golden.rs`).
+fn approx_wilcoxon_p(w_plus: f64, nonzero_ranks: &[f64]) -> f64 {
+    let mu = nonzero_ranks.iter().sum::<f64>() / 2.0;
+    let sigma2 = nonzero_ranks.iter().map(|r| r * r).sum::<f64>() / 4.0;
+    let sigma = sigma2.sqrt();
 
     if sigma == 0.0 {
         return 1.0;

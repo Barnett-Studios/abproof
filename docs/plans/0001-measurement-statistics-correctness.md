@@ -34,18 +34,27 @@ block and the `n(n+1)/4` / `n(n+1)(2n+1)/24` moments. Update the call site
 and exact-path tests are invariant under the fix — verified by hand).
 
 ### N3 — property / fuzz invariants  ·  `local: false` (high-risk core)
-`tests/stats_golden.rs`: random deltas (seeded, deterministic) → corrected p never below the
-exact-enumeration reference (never anti-conservative); monotonic in |W+−μ|; `p∈[0,1]`;
-degenerate inputs return 1.0.
-`accept`: `cargo test --test stats_golden` green.
+`tests/stats_golden.rs`: seeded random deltas assert the invariants that are actually TRUE of the
+corrected statistic — `p ∈ [0,1]` and finite; **sign symmetry** `p(δ)=p(−δ)`; **permutation
+invariance**; and, on the exact path, equality to an independent brute-force enumeration.
+(We deliberately do **not** assert "corrected p never below the exact reference": a normal
+approximation of a discrete statistic is legitimately anti-conservative in the tails — e.g. the
+flagship case approximates to 0.7955 while exact enumeration is 0.8125. Correctness is pinned by
+equality-to-scipy on the N1 golden matrix, not by a bound against enumeration.) Degenerate inputs
+(`n=0,1`, all-zeros) return 1.0.
+`accept`: `cargo test --test stats_golden` green (and the sign-symmetry check itself is RED
+against the pre-fix code, which breaks symmetry when zeros are present).
 
 ### N4 — aggregate within node (D2)  ·  `local: true`
-`run.rs::run_experiment`: after `pairs` is built, group by `node_id` (BTreeMap, battery order),
-compute per-node `mean(treatment)−mean(baseline)`, feed that vector to
-`wilcoxon_signed_rank` / `cohens_dz` / `bootstrap_median_ci` (replaces the flat per-rep map at
-`run.rs:499`).
-`accept` (author-committed RED): a scripted 3-node × 4-rep experiment asserts the delta vector
-handed to the test has length 3, not 12 (via a test seam exposing the aggregated deltas).
+Extract `score::node_pass_deltas(pairs)` — a pure, directly unit-testable helper that groups by
+`node_id` in **first-seen (battery) order** (a `Vec` of ids + a `HashMap` accumulator; *not* a
+`BTreeMap`, which would reorder to lexical and is unnecessary), computes per-node
+`mean(treatment)−mean(baseline)`, and returns the vector. `run.rs::run_experiment` calls it in
+place of the flat per-rep map at `run.rs:499`; the result feeds `wilcoxon_signed_rank` /
+`cohens_dz` / `bootstrap_median_ci`.
+`accept` (author-committed RED): unit test over 3 nodes × 4 reps asserts the vector has length 3
+(not 12) **and** that a node with a mixed within-node outcome yields the mean delta (`-0.5`), not
+a sum (`-2.0`) — so a wrong aggregator cannot pass.
 
 ### N5 — align gate contrast (D3)  ·  `local: false` (contract change)
 `score.rs::gate`: take the in-run baseline arm rate as `baseline_value` (new param

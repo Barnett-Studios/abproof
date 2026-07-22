@@ -17,7 +17,12 @@ use abproof::stats::wilcoxon_signed_rank;
 /// `(label, deltas, scipy_expected_p, is_red_against_buggy_code)`.
 const GOLDEN: &[(&str, &[f64], f64, bool)] = &[
     // ── RED: zeros + ties → broken approximation path; buggy code is wrong ──────────
-    ("audit_counterexample", &[0., 0., 1., -1., 2., 2., -3.], 0.795_511, true),
+    (
+        "audit_counterexample",
+        &[0., 0., 1., -1., 2., 2., -3.],
+        0.795_511,
+        true,
+    ),
     (
         "thirty_zeros_ten_nonzero",
         &[
@@ -27,16 +32,41 @@ const GOLDEN: &[(&str, &[f64], f64, bool)] = &[
         0.191_567,
         true,
     ),
-    ("n6_zeros_ties_all_pos", &[0., 0., 1., 1., 2., 2., 3., 3.], 0.022_785, true),
-    ("n6_zeros_ties_mixed", &[0., 0., -1., 1., 2., 2., 3., -3.], 0.476_732, true),
+    (
+        "n6_zeros_ties_all_pos",
+        &[0., 0., 1., 1., 2., 2., 3., 3.],
+        0.022_785,
+        true,
+    ),
+    (
+        "n6_zeros_ties_mixed",
+        &[0., 0., -1., 1., 2., 2., 3., -3.],
+        0.476_732,
+        true,
+    ),
     // The bug flips the verdict the OTHER way here: correct p=0.048 (< 0.05, significant),
     // buggy p=0.146 (not significant) — the buggy code MISSES a real regression.
-    ("zeros_ties_gate_flip", &[0., 0., 0., -1., -1., -2., -2., -3., 1., -3.], 0.047_604, true),
+    (
+        "zeros_ties_gate_flip",
+        &[0., 0., 0., -1., -1., -2., -2., -3., 1., -3.],
+        0.047_604,
+        true,
+    ),
     // ── GREEN guards: exact path & no-zero tie path are already correct; keep them so ──
-    ("exact_all_positive_n5", &[1., 2., 3., 4., 5.], 0.062_500, false),
+    (
+        "exact_all_positive_n5",
+        &[1., 2., 3., 4., 5.],
+        0.062_500,
+        false,
+    ),
     ("exact_mixed_n4", &[1., 2., 3., -4.], 0.875_000, false),
     // Zeros but DISTINCT non-zero magnitudes → exact path, which handles Pratt correctly.
-    ("exact_with_zeros_distinct", &[0., 0., 1., 2., 3., 4., 5., 6.], 0.031_250, false),
+    (
+        "exact_with_zeros_distinct",
+        &[0., 0., 1., 2., 3., 4., 5., 6.],
+        0.031_250,
+        false,
+    ),
     // Ties but NO zeros → the pre-existing tie correction was already exact here.
     ("no_zero_all_ties_n4", &[2., 2., 2., 2.], 0.071_861, false),
     // ── Boundaries ────────────────────────────────────────────────────────────────
@@ -58,7 +88,11 @@ fn matches_scipy_oracle() {
             failures.push(format!("{label}: got {got:.6}, want {expected:.6} (scipy)"));
         }
     }
-    assert!(failures.is_empty(), "scipy-oracle mismatches:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "scipy-oracle mismatches:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ── Property / fuzz invariants (deterministic; no external oracle) ──────────────────
@@ -82,12 +116,20 @@ fn brute_exact_p(deltas: &[f64]) -> f64 {
         }
         i = j;
     }
-    let r: Vec<f64> = (0..deltas.len()).filter(|&k| deltas[k] != 0.0).map(|k| rank[k]).collect();
+    let r: Vec<f64> = (0..deltas.len())
+        .filter(|&k| deltas[k] != 0.0)
+        .map(|k| rank[k])
+        .collect();
     let n = r.len();
     if n == 0 {
         return 1.0;
     }
-    let w_plus: f64 = r.iter().zip(deltas.iter().filter(|&&d| d != 0.0)).filter(|(_, &d)| d > 0.0).map(|(&rr, _)| rr).sum();
+    let w_plus: f64 = r
+        .iter()
+        .zip(deltas.iter().filter(|&&d| d != 0.0))
+        .filter(|(_, &d)| d > 0.0)
+        .map(|(&rr, _)| rr)
+        .sum();
     let mean: f64 = r.iter().sum::<f64>() / 2.0;
     let obs = (w_plus - mean).abs();
     let mut count = 0u64;
@@ -101,7 +143,9 @@ fn brute_exact_p(deltas: &[f64]) -> f64 {
 }
 
 fn lcg(state: &mut u64) -> u64 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *state >> 16
 }
 
@@ -113,18 +157,27 @@ fn fuzz_invariants() {
         let deltas: Vec<f64> = (0..n).map(|_| (lcg(&mut s) % 7) as f64 - 3.0).collect(); // {-3..3}
         let p = wilcoxon_signed_rank(&deltas).p_two_sided;
 
-        assert!(p.is_finite() && (0.0..=1.0).contains(&p), "p out of range for {deltas:?}: {p}");
+        assert!(
+            p.is_finite() && (0.0..=1.0).contains(&p),
+            "p out of range for {deltas:?}: {p}"
+        );
 
         // Sign symmetry: negating every delta swaps W+↔W- but leaves |W+−μ| unchanged.
         let neg: Vec<f64> = deltas.iter().map(|d| -d).collect();
         let p_neg = wilcoxon_signed_rank(&neg).p_two_sided;
-        assert!((p - p_neg).abs() < 1e-9, "not sign-symmetric for {deltas:?}: {p} vs {p_neg}");
+        assert!(
+            (p - p_neg).abs() < 1e-9,
+            "not sign-symmetric for {deltas:?}: {p} vs {p_neg}"
+        );
 
         // Permutation invariance: order must not matter.
         let mut rev = deltas.clone();
         rev.reverse();
         let p_rev = wilcoxon_signed_rank(&rev).p_two_sided;
-        assert!((p - p_rev).abs() < 1e-9, "not permutation-invariant for {deltas:?}");
+        assert!(
+            (p - p_rev).abs() < 1e-9,
+            "not permutation-invariant for {deltas:?}"
+        );
     }
 }
 
@@ -142,6 +195,9 @@ fn exact_path_equals_independent_enumeration() {
     for d in cases {
         let got = wilcoxon_signed_rank(d).p_two_sided;
         let want = brute_exact_p(d);
-        assert!((got - want).abs() < 1e-9, "exact path {d:?}: got {got}, enum {want}");
+        assert!(
+            (got - want).abs() < 1e-9,
+            "exact path {d:?}: got {got}, enum {want}"
+        );
     }
 }
