@@ -1,96 +1,130 @@
-//! Scipy-oracle golden tests for the paired Wilcoxon signed-rank p-value (issue #7).
+//! Reference-oracle golden tests for the paired Wilcoxon signed-rank p-value (issue #7).
 //!
-//! Each `expected` p-value is produced by an INDEPENDENT oracle —
-//! `scipy.stats.wilcoxon(zero_method='pratt', correction=True, mode='approx')` for the
-//! normal-approximation path, and exact 2ⁿ sign-flip enumeration for the exact path
-//! (scipy 1.18.0; generator committed at `tests/golden/oracle.py`). They are NOT derived
-//! from abproof's own output, so they test *correctness*, not self-consistency.
+//! Routing (`src/stats.rs`): batteries with `n_nonzero ≤ 25` use the **exact** 2ⁿ sign-flip
+//! enumeration (valid with ties — it sums the observed Pratt ranks); larger batteries use the
+//! normal approximation with the sign-flip randomization moments `μ = Σr/2`, `σ² = Σr²/4`.
 //!
-//! The `// RED` cases FAIL against the pre-fix code (which tested Pratt-ranked W+ against
-//! zero-free null moments) and pass only once the moments are corrected to the sign-flip
-//! randomization moments μ = Σr/2, σ² = Σr²/4. The trigger for the bug is zeros present
-//! (Pratt rank-shift) AND ties among the non-zero |δ| (which forces the broken approximation
-//! path) — the ubiquitous real-data case for per-node pass-rate deltas.
+//! Oracles (both INDEPENDENT of abproof's own output — these test correctness, not
+//! self-consistency):
+//!   * exact path → the true conditional randomization p-value, computed by an independent
+//!     brute-force enumeration (`brute_exact_p` below; also cross-checked against
+//!     `scipy.stats.wilcoxon(mode='exact')` on tie-free inputs, where it agrees to 1e-9).
+//!   * approx path → `scipy.stats.wilcoxon(zero_method='pratt', correction=True, mode='approx')`.
+//!
+//! Every value below FAILS against the pre-fix code: the original tested Pratt-ranked W+ against
+//! zero-free normal-approx moments AND sent every tied input (all real pass/fail data ties) to
+//! that approximation, whose −½ continuity correction is calibrated for a unit-step statistic —
+//! under heavy ties W+ steps by (n+1)/2, so it under-corrects and is anti-conservative near α
+//! (e.g. 5 unanimous ±1 nodes: old ≈0.037 "significant" vs correct 0.0625 "not"). The fix
+//! corrects the moments AND routes small/tied batteries to the exact test.
 
-use abproof::stats::wilcoxon_signed_rank;
+use abproof::stats::{wilcoxon_signed_rank, WilcoxonMethod};
 
-/// `(label, deltas, scipy_expected_p, is_red_against_buggy_code)`.
-const GOLDEN: &[(&str, &[f64], f64, bool)] = &[
-    // ── RED: zeros + ties → broken approximation path; buggy code is wrong ──────────
+/// `(label, deltas, expected_p, expected_method)`.
+const GOLDEN: &[(&str, &[f64], f64, WilcoxonMethod)] = &[
+    // ── exact path (n_nonzero ≤ 25): expected = true randomization p ─────────────────
+    // The audit counterexample: was 0.0769 (buggy approx), then 0.7955 (corrected approx),
+    // now 0.8125 — the exact truth.
     (
         "audit_counterexample",
         &[0., 0., 1., -1., 2., 2., -3.],
-        0.795_511,
-        true,
-    ),
-    (
-        "thirty_zeros_ten_nonzero",
-        &[
-            0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
-            0., 0., 0., 0., 0., 0., 0., 0., 1., -1., 2., 2., -1., 3., 1., -2., 2., 1.,
-        ],
-        0.191_567,
-        true,
+        0.812_500,
+        WilcoxonMethod::ExactPratt,
     ),
     (
         "n6_zeros_ties_all_pos",
         &[0., 0., 1., 1., 2., 2., 3., 3.],
-        0.022_785,
-        true,
+        0.031_250,
+        WilcoxonMethod::ExactPratt,
     ),
     (
         "n6_zeros_ties_mixed",
         &[0., 0., -1., 1., 2., 2., 3., -3.],
-        0.476_732,
-        true,
+        0.531_250,
+        WilcoxonMethod::ExactPratt,
     ),
-    // The bug flips the verdict the OTHER way here: correct p=0.048 (< 0.05, significant),
-    // buggy p=0.146 (not significant) — the buggy code MISSES a real regression.
+    // Boundary honesty: 7 nodes, mostly one direction → exact 0.0625 is NOT significant at
+    // 0.05. The buggy approx reported 0.146; the corrected approx reported 0.0476 (a false
+    // "significant"); the exact truth is 0.0625 — the gate must NOT fire here.
     (
-        "zeros_ties_gate_flip",
+        "zeros_ties_boundary",
         &[0., 0., 0., -1., -1., -2., -2., -3., 1., -3.],
-        0.047_604,
-        true,
+        0.062_500,
+        WilcoxonMethod::ExactPratt,
     ),
-    // ── GREEN guards: exact path & no-zero tie path are already correct; keep them so ──
+    // Ties but no zeros — the old approx was anti-conservative here too (0.0719 vs 0.125).
+    (
+        "no_zero_all_ties_n4",
+        &[2., 2., 2., 2.],
+        0.125_000,
+        WilcoxonMethod::ExactPratt,
+    ),
     (
         "exact_all_positive_n5",
         &[1., 2., 3., 4., 5.],
         0.062_500,
-        false,
+        WilcoxonMethod::ExactPratt,
     ),
-    ("exact_mixed_n4", &[1., 2., 3., -4.], 0.875_000, false),
-    // Zeros but DISTINCT non-zero magnitudes → exact path, which handles Pratt correctly.
+    (
+        "exact_mixed_n4",
+        &[1., 2., 3., -4.],
+        0.875_000,
+        WilcoxonMethod::ExactPratt,
+    ),
     (
         "exact_with_zeros_distinct",
         &[0., 0., 1., 2., 3., 4., 5., 6.],
         0.031_250,
-        false,
+        WilcoxonMethod::ExactPratt,
     ),
-    // Ties but NO zeros → the pre-existing tie correction was already exact here.
-    ("no_zero_all_ties_n4", &[2., 2., 2., 2.], 0.071_861, false),
-    // ── Boundaries ────────────────────────────────────────────────────────────────
-    ("single_nonzero", &[5.], 1.000_000, false),
-    ("all_zero", &[0., 0., 0.], 1.000_000, false),
-    ("empty", &[], 1.000_000, false),
+    // ── boundaries ──────────────────────────────────────────────────────────────────
+    (
+        "single_nonzero",
+        &[5.],
+        1.000_000,
+        WilcoxonMethod::ExactPratt,
+    ),
+    (
+        "all_zero",
+        &[0., 0., 0.],
+        1.000_000,
+        WilcoxonMethod::NormalApproxPratt,
+    ),
+    ("empty", &[], 1.000_000, WilcoxonMethod::NormalApproxPratt),
+    // ── approx path (n_nonzero = 30 > 25): expected = scipy Wilcoxon-Pratt approx ─────
+    (
+        "large_battery_approx",
+        &[
+            0., 0., 0., 0., 0., 1., -1., 2., -1., 3., 1., -2., 2., 1., -1., 2., 3., -1., 1., 2.,
+            -2., 1., 3., -1., 2., 1., -2., 2., 1., -1., 3., 1., -1., 2., -1.,
+        ],
+        0.046_617,
+        WilcoxonMethod::NormalApproxPratt,
+    ),
 ];
 
 #[test]
-fn matches_scipy_oracle() {
-    // Tolerance covers the Abramowitz–Stegun erf approximation (|err| < 1.5e-7) used by
-    // the crate vs. scipy's exact erf; every RED case differs from the buggy value by
-    // > 0.02, far outside this band.
+fn matches_reference_oracle() {
+    // Exact-path values are pinned to the independent enumeration (they agree to ~1e-9); the
+    // approx-path value is scipy's, matched within the Abramowitz–Stegun erf band (< 1.5e-7).
+    // Every RED case differs from the pre-fix value by ≫ this tolerance.
     const TOL: f64 = 1.5e-3;
     let mut failures = Vec::new();
-    for (label, deltas, expected, _red) in GOLDEN {
-        let got = wilcoxon_signed_rank(deltas).p_two_sided;
-        if (got - expected).abs() > TOL {
-            failures.push(format!("{label}: got {got:.6}, want {expected:.6} (scipy)"));
+    for (label, deltas, expected, method) in GOLDEN {
+        let r = wilcoxon_signed_rank(deltas);
+        if (r.p_two_sided - expected).abs() > TOL {
+            failures.push(format!(
+                "{label}: p={:.6}, want {expected:.6}",
+                r.p_two_sided
+            ));
+        }
+        if r.n_nonzero > 0 && r.method != *method {
+            failures.push(format!("{label}: method={:?}, want {method:?}", r.method));
         }
     }
     assert!(
         failures.is_empty(),
-        "scipy-oracle mismatches:\n{}",
+        "oracle mismatches:\n{}",
         failures.join("\n")
     );
 }
@@ -100,7 +134,6 @@ fn matches_scipy_oracle() {
 /// Independent brute-force exact two-sided signed-rank p (sign-flip randomization over the
 /// observed Pratt ranks). Valid with ties; O(2ⁿ) — callers keep n small.
 fn brute_exact_p(deltas: &[f64]) -> f64 {
-    // Pratt average ranks over |δ| including zeros, then keep non-zero.
     let mut idx: Vec<usize> = (0..deltas.len()).collect();
     idx.sort_by(|&a, &b| deltas[a].abs().partial_cmp(&deltas[b].abs()).unwrap());
     let mut rank = vec![0.0f64; deltas.len()];
@@ -178,26 +211,34 @@ fn fuzz_invariants() {
             (p - p_rev).abs() < 1e-9,
             "not permutation-invariant for {deltas:?}"
         );
+
+        // On the exact path (n ≤ 25, which every fuzz case satisfies), the crate must equal
+        // an INDEPENDENT enumeration — including tied inputs (the Option-C path).
+        let want = brute_exact_p(&deltas);
+        assert!(
+            (p - want).abs() < 1e-9,
+            "exact path diverges from enumeration for {deltas:?}: {p} vs {want}"
+        );
     }
 }
 
 #[test]
-fn exact_path_equals_independent_enumeration() {
-    // On the exact path (no ties among non-zero |δ|, small n), the crate must equal an
-    // independent brute-force enumeration — a scipy-free correctness anchor.
+fn exact_path_equals_independent_enumeration_with_ties() {
+    // Explicit tie + zero cases: the crate's exact path must equal the independent brute-force
+    // enumeration (this is the Option-C path that the pre-fix code never reached).
     let cases: &[&[f64]] = &[
-        &[1., 2., 3., 4., 5.],
-        &[1., 2., 3., -4.],
-        &[0., 0., 1., 2., 3., 4., 5., 6.],
-        &[-1., 2., -3., 4., -5.],
-        &[0., 1., -2., 3.],
+        &[0., 0., 1., -1., 2., 2., -3.], // audit
+        &[2., 2., 2., 2.],               // all ties
+        &[0., 0., 1., 1., 2., 2., 3., 3.],
+        &[-1., 1., -1., 1., -1.],
+        &[0., 0., 0., -1., -1., -2., -2., -3., 1., -3.],
     ];
     for d in cases {
         let got = wilcoxon_signed_rank(d).p_two_sided;
         let want = brute_exact_p(d);
         assert!(
             (got - want).abs() < 1e-9,
-            "exact path {d:?}: got {got}, enum {want}"
+            "exact-with-ties {d:?}: got {got}, enum {want}"
         );
     }
 }

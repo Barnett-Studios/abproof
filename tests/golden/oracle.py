@@ -43,10 +43,10 @@ def has_ties_nonzero(deltas):
 
 
 def expected(deltas):
-    """What `wilcoxon_signed_rank` should return: exact when reachable, else corrected approx."""
+    """What `wilcoxon_signed_rank` should return (issue #7, Option C): the exact enumeration for
+    n_nonzero <= 25 (ties allowed), else the corrected normal approximation (== scipy Pratt)."""
     nz = [x for x in deltas if x != 0]
-    use_exact = len(nz) <= 25 and not has_ties_nonzero(deltas)
-    return exact_enum(deltas) if use_exact else scipy_pratt(deltas)
+    return exact_enum(deltas) if len(nz) <= 25 else scipy_pratt(deltas)
 
 
 GOLDEN = {

@@ -59,9 +59,12 @@ the shared loop. Remote/infra failure maps to *abort*, never a measured 0.0.
 **The node is the unit of replication.** Each node's `reps` are aggregated into ONE paired
 observation — the mean pass score per arm — before the paired test; the delta series has one
 entry per node. `reps` correlated runs of the same node are not independent observations. The
-paired **Wilcoxon signed-rank** p-value uses the sign-flip randomization null moments
-`μ = Σr/2`, `σ² = Σr²/4` over the non-zero Pratt ranks — exact for Pratt ranks with ties, and
-matching `scipy.stats.wilcoxon(zero_method='pratt')` to machine precision.
+paired test is **Wilcoxon signed-rank**, computed **exactly** (2ⁿ sign-flip enumeration, valid
+with ties) for batteries of ≤ 25 gradable nodes — the true conditional p-value — and by a normal
+approximation with the sign-flip randomization moments `μ = Σr/2`, `σ² = Σr²/4` for larger
+batteries (matching `scipy.stats.wilcoxon(zero_method='pratt')` to machine precision). The exact
+path is required because the normal approximation is anti-conservative near α under heavy ties
+(the pass/fail-delta regime).
 
 **The gate is significance-based, not a bare point estimate.** A worse observed value only fails
 the run when it also clears statistical significance on the paired test over the gated metric's

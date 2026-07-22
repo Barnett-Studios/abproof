@@ -61,6 +61,16 @@ that staleness silently decide the gate against a different series than the p-va
 
 ## Alternatives considered
 
+- **A mixed-effects / GEE model (node random intercept, per-rep binary outcome, treatment fixed
+  effect) instead of aggregate-then-test.** This is the more efficient textbook remedy for
+  clustered binary data: it uses per-rep information directly rather than collapsing to a rate
+  first, and would handle the unequal-gradable-reps case (below) more principledly. Rejected for
+  **scope and dependency** reasons, not correctness: it needs an iterative GLMM fitter (a real
+  numerical dependency) in a crate that deliberately inlines its statistics, and aggregate-then-
+  paired-test is the standard, defensible pseudo-replication fix (Hurlbert 1984). Notably, a
+  cluster-level McNemar reduces to *exactly* this per-node rate delta (ADR 0001, reason 2), so
+  the aggregate approach is not a crude shortcut — it is where the rigorous alternatives converge.
+  A GLMM is a sound future enhancement if per-rep efficiency ever matters.
 - **Keep committed `baseline.json` as the point-estimate anchor (status quo).** Rejected: it is
   exactly the D3 incoherence — `worse` and `p` then describe different comparisons whenever the
   committed value ≠ the in-run baseline arm.
