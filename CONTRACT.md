@@ -56,22 +56,39 @@ are **tracked**. Statistics are hand-rolled and non-verbatim (Pratt treatment of
 ties, gate-vs-track separation). A cross-loop manifest (local vs claude-cli) compares runtimes over
 the shared loop. Remote/infra failure maps to *abort*, never a measured 0.0.
 
-**The gate is significance-based, not a bare point estimate.** A worse observed value
-(`observed < baseline - tolerance`) only fails the run when it also clears statistical
-significance on the paired Wilcoxon signed-rank test over the gated metric's within-pair
-deltas:
+**The node is the unit of replication.** Each node's `reps` are aggregated into ONE paired
+observation — the mean pass score per arm — before the paired test; the delta series has one
+entry per node. `reps` correlated runs of the same node are not independent observations. The
+paired test is **Wilcoxon signed-rank**, computed **exactly** (2ⁿ sign-flip enumeration, valid
+with ties) for batteries of ≤ 25 gradable nodes — the true conditional p-value — and by a normal
+approximation with the sign-flip randomization moments `μ = Σr/2`, `σ² = Σr²/4` for larger
+batteries (matching `scipy.stats.wilcoxon(zero_method='pratt')` to machine precision). The exact
+path is required because the normal approximation is anti-conservative near α under heavy ties
+(the pass/fail-delta regime).
+
+**The gate is significance-based, not a bare point estimate.** A worse observed value only fails
+the run when it also clears statistical significance on the paired test over the gated metric's
+**per-node** deltas:
 
 ```
-worse     = observed_value < baseline_value - tolerance
-regressed = worse && p_two_sided < alpha        // alpha defaults to 0.05
+worse     = treatment_arm_value < baseline_arm_value - tolerance   // both in-run, this experiment
+regressed = worse && p_two_sided < alpha                           // alpha defaults to 0.05
 ```
+
+Both halves reference the **in-run baseline arm** — the same series the p-value is computed
+against. The committed `<stem>.baseline.json` is **not** the gate anchor (using it for the point
+estimate while the p-value tested the in-run arm mixed two reference series in one verdict); it is
+retained as a **drift reference** — a large gap between the committed value and the freshly
+measured baseline arm is surfaced as a validity warning, and a required-but-absent gated value
+warns rather than aborting.
 
 `alpha` is `Manifest.gate_alpha` when set (validated to `(0.0, 1.0)`), else `0.05`. A metric
 with no paired-delta series to test (`p_two_sided: None`) falls back to the bare point-estimate
-rule. **Small-n consequence, stated honestly:** an underpowered run — too few paired reps to
-reach `p < alpha` even for a real effect — reports "not a confirmed regression" and exits 0.
-This is by design: the gate refuses to fail a run on a point estimate it cannot statistically
-back up. `reps` (default 30) is the lever for statistical power, not the gate rule.
+rule. **Small-n consequence, stated honestly:** the significance test's `n` is the **node
+count**, so the lever for statistical power is the **battery size**, not `reps` (which only
+sharpens each node's rate). A run over too few nodes — even at high `reps` — cannot reach
+`p < alpha` for a real effect and honestly reports "not a confirmed regression", exiting 0
+rather than failing on a point estimate it cannot statistically back up.
 
 ## Compatibility
 

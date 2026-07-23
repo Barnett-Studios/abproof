@@ -81,6 +81,12 @@ const BOOTSTRAP_SEED: u64 = 0xAB12_3456_789A_BCDE;
 const BOOTSTRAP_B: usize = 10_000;
 const BOOTSTRAP_ALPHA: f64 = 0.05;
 
+/// Absolute gap between the committed `baseline.json` value and the in-run baseline arm
+/// beyond which the committed baseline is flagged as stale (D3 drift reference). Not a gate
+/// input — purely advisory.
+// ponytail: fixed 0.10 threshold; make it a manifest knob only if a repo needs a tighter band.
+const BASELINE_DRIFT_WARN: f64 = 0.10;
+
 /// Conservative per-run time estimate used for the `--dry-run` envelope.
 const EST_MINUTES_PER_RUN: f64 = 2.0;
 
@@ -495,11 +501,36 @@ pub fn run_experiment(
     let baseline_agg = score::aggregate_arm(&baseline_passes, &baseline_judge, &[]);
     let treatment_agg = score::aggregate_arm(&treatment_passes, &treatment_judge, &[]);
 
-    // ── within-pair deltas for the gated metric (node_pass_rate) ────────────
-    let deltas: Vec<f64> = pairs
-        .iter()
-        .map(|p| p.treatment_pass - p.baseline_pass)
-        .collect();
+    // D3 drift reference (issue #7): the committed baseline.json is no longer the gate
+    // anchor — the gate compares the in-run treatment arm against the in-run *baseline
+    // arm*, the same series the p-value tests. A large gap between the committed value
+    // and the freshly-measured baseline arm means the committed baseline is stale;
+    // surface it as a validity warning rather than let it silently decide a gate against
+    // a different series than was tested.
+    match baseline.gated.get("node_pass_rate") {
+        Some(&committed) => {
+            let drift = (baseline_agg.node_pass_rate - committed).abs();
+            if drift > BASELINE_DRIFT_WARN {
+                validity_warnings.push(format!(
+                    "committed baseline node_pass_rate {committed:.3} drifted {drift:.3} from the \
+                     in-run baseline arm {:.3} — refresh baseline.json",
+                    baseline_agg.node_pass_rate
+                ));
+            }
+        }
+        None => validity_warnings.push(
+            "committed baseline.json has no node_pass_rate entry — no drift reference for the \
+             gated metric (the gate still compares the in-run arms)"
+                .to_string(),
+        ),
+    }
+
+    // ── per-node deltas for the gated metric (node_pass_rate) ───────────────
+    // D2 (issue #7): the node is the unit of replication. `score::node_pass_deltas`
+    // aggregates each node's `reps` into ONE paired observation (the mean pass score per
+    // arm) before the paired test — R correlated reps of one node are not R independent
+    // observations. See its docs for the ordering/weighting contract.
+    let deltas = score::node_pass_deltas(&pairs);
 
     let wilcoxon = stats::wilcoxon_signed_rank(&deltas);
     let dz = stats::cohens_dz(&deltas);
@@ -511,7 +542,7 @@ pub fn run_experiment(
     // see `score::gate` for the honesty rationale.
     let verdicts = score::gate(
         manifest,
-        baseline,
+        &baseline_agg,
         &treatment_agg,
         Some(wilcoxon.p_two_sided),
     );
@@ -1295,7 +1326,13 @@ mod tests {
             rec.total_claude_calls, 4,
             "2 nodes × 1 rep × 2 arms × 1 call = 4"
         );
-        assert!(rec.validity_warnings.is_empty(), "no warnings expected");
+        // The committed baseline (0.0) is stale vs the all-Success in-run arm (1.0), so a
+        // D3 drift warning is expected. No OTHER (e.g. tools-off-leak) warning may appear.
+        assert!(
+            rec.validity_warnings.iter().all(|w| w.contains("drifted")),
+            "only the expected baseline-drift warning may appear: {:?}",
+            rec.validity_warnings
+        );
     }
 
     // ── seeds_honoured aggregate (truthful replacement for the v1 hardcoded
@@ -1348,10 +1385,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_gated_metric_in_baseline_aborts_not_false_pass() {
-        // A gated metric (node_pass_rate) absent from the baseline JSON must abort as a
-        // setup fault (exit 3) naming the metric — NOT silently yield gate_exit 0, which
-        // would report a PASS for a comparison that never ran (the false-PASS hole).
+    fn missing_gated_metric_in_baseline_is_a_drift_gap_not_an_abort() {
+        // Post-D3 (issue #7): the committed baseline.json is a DRIFT reference, not the
+        // gate anchor — the gate compares the in-run treatment arm against the in-run
+        // baseline arm. A gated metric absent from the committed baseline therefore does
+        // NOT make the comparison unevaluable (no false-PASS hole): the run still produces
+        // a valid gate verdict against the in-run arms, and the missing drift reference is
+        // surfaced as a validity warning rather than an abort.
         let stub = scripted_stub(&[("a", driver::RunStatus::Success, Some(0.0_f64), 0)]);
         let m = manifest_n_nodes(&["a"]);
         let nodes = vec![make_node("a")];
@@ -1364,19 +1404,174 @@ mod tests {
         let rec = run_experiment(&m, &nodes, &stub, &zero_judge(), &empty_baseline, &opts);
 
         assert!(
+            !rec.aborted,
+            "gate uses the in-run baseline arm; a missing committed value is not unevaluable"
+        );
+        // The gated metric was still evaluated (row present with a verdict).
+        assert!(
+            rec.rows
+                .iter()
+                .any(|r| r.metric == "node_pass_rate" && r.verdict.is_some()),
+            "node_pass_rate must still be gated against the in-run arm"
+        );
+        assert!(
+            rec.validity_warnings
+                .iter()
+                .any(|w| w.contains("no drift reference")),
+            "a missing committed baseline value must surface a drift-reference warning: {:?}",
+            rec.validity_warnings
+        );
+    }
+
+    #[test]
+    fn unobservable_gated_metric_still_aborts_not_false_pass() {
+        // The real false-PASS protection is unchanged: a gated metric the engine cannot
+        // observe (no `observed_for` mapping) yields no verdict, so the measurement-
+        // integrity guard aborts (exit 3) naming it rather than reporting gate_exit 0.
+        let stub = scripted_stub(&[("a", driver::RunStatus::Success, Some(0.0_f64), 0)]);
+        let mut m = manifest_n_nodes(&["a"]);
+        // Gate a metric with no observed_for mapping (engine_broken_rate is unwired in v1).
+        m.metrics.insert(
+            "engine_broken_rate".to_string(),
+            experiment::MetricTag::Gated,
+        );
+        let nodes = vec![make_node("a")];
+        let opts = RunOptions { max_cost: None };
+
+        let rec = run_experiment(&m, &nodes, &stub, &zero_judge(), &zero_baseline(), &opts);
+
+        assert!(
             rec.aborted,
-            "a gated metric missing from the baseline must abort, not fabricate a pass"
+            "an unobservable gated metric must abort, not fabricate a pass"
         );
         assert_eq!(
             rec.gate_exit, 3,
-            "aborted → gate_exit must be 3, never 0 (false PASS)"
+            "aborted → gate_exit 3, never 0 (false PASS)"
         );
-        assert!(rec.rows.is_empty(), "aborted record must have no gate rows");
         let reason = rec.abort_reason.as_deref().unwrap_or("");
         assert!(
-            reason.contains("node_pass_rate"),
-            "abort reason must name the missing gated metric, got: {reason}"
+            reason.contains("engine_broken_rate"),
+            "abort reason must name the unobservable gated metric, got: {reason}"
         );
+    }
+
+    // ── e2e: gate decision matches the corrected statistics (issue #7, N7) ────────
+
+    /// AsymmetricStub map: every node baseline=Success, treatment=Failure.
+    fn all_treatment_worse(ids: &[&str]) -> AsymmetricStub {
+        AsymmetricStub {
+            scripted: ids
+                .iter()
+                .map(|id| {
+                    (
+                        id.to_string(),
+                        (driver::RunStatus::Success, driver::RunStatus::Failure),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn e2e_confirmed_regression_over_enough_nodes_exits_1() {
+        // 6 nodes, baseline arm passes every node, treatment fails every node → six
+        // per-node deltas of −1.0 → the paired test clears alpha → a CONFIRMED regression
+        // (gate_exit 1, verdict Some(false)). n_nonzero is the NODE count (6), not
+        // node×rep — the D2 fix. The committed baseline (0.70) is irrelevant: the gate
+        // uses the in-run baseline arm (1.0).
+        let ids = ["n1", "n2", "n3", "n4", "n5", "n6"];
+        let m = manifest_n_nodes_both_local(&ids);
+        let nodes: Vec<_> = ids.iter().map(|id| make_node(id)).collect();
+        let rec = run_experiment(
+            &m,
+            &nodes,
+            &all_treatment_worse(&ids),
+            &zero_judge(),
+            &baseline_070(),
+            &RunOptions { max_cost: None },
+        );
+        assert!(!rec.aborted, "abort_reason={:?}", rec.abort_reason);
+        let row = rec
+            .rows
+            .iter()
+            .find(|r| r.metric == "node_pass_rate")
+            .unwrap();
+        assert_eq!(
+            row.n_nonzero,
+            Some(6),
+            "one delta per node, not per (node,rep)"
+        );
+        assert!(
+            row.p_two_sided.unwrap() < 0.05,
+            "6 consistent regressions must be significant; p={:?}",
+            row.p_two_sided
+        );
+        assert_eq!(rec.gate_exit, 1, "confirmed regression → exit 1");
+        assert_eq!(row.verdict, Some(false));
+    }
+
+    #[test]
+    fn e2e_single_node_worse_is_underpowered_exit_0() {
+        // The same treatment-worse signal over ONE node cannot reach significance
+        // (n=1 → p=1.0), so the gate honestly reports "not a confirmed regression"
+        // (exit 0) instead of the old pseudo-replicated false exit 1 (D2).
+        let m = manifest_n_nodes_both_local(&["only"]);
+        let nodes = vec![make_node("only")];
+        let rec = run_experiment(
+            &m,
+            &nodes,
+            &all_treatment_worse(&["only"]),
+            &zero_judge(),
+            &baseline_070(),
+            &RunOptions { max_cost: None },
+        );
+        let row = rec
+            .rows
+            .iter()
+            .find(|r| r.metric == "node_pass_rate")
+            .unwrap();
+        assert_eq!(row.n_nonzero, Some(1));
+        assert!(row.delta < 0.0, "point estimate is worse (treatment lost)");
+        assert!(
+            (row.p_two_sided.unwrap() - 1.0).abs() < 1e-9,
+            "single node cannot be significant; p={:?}",
+            row.p_two_sided
+        );
+        assert_eq!(
+            rec.gate_exit, 0,
+            "underpowered → not a confirmed regression"
+        );
+        assert_eq!(row.verdict, Some(true));
+    }
+
+    #[test]
+    fn e2e_mixed_direction_is_not_a_regression_exit_0() {
+        // 6 nodes, treatment wins on half and loses on half → no net point-estimate
+        // regression (baseline arm rate == treatment rate) → exit 0.
+        let ids = ["n1", "n2", "n3", "n4", "n5", "n6"];
+        let m = manifest_n_nodes_both_local(&ids);
+        let nodes: Vec<_> = ids.iter().map(|id| make_node(id)).collect();
+        let scripted = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let pair = if i % 2 == 0 {
+                    (driver::RunStatus::Success, driver::RunStatus::Failure)
+                } else {
+                    (driver::RunStatus::Failure, driver::RunStatus::Success)
+                };
+                (id.to_string(), pair)
+            })
+            .collect();
+        let rec = run_experiment(
+            &m,
+            &nodes,
+            &AsymmetricStub { scripted },
+            &zero_judge(),
+            &baseline_070(),
+            &RunOptions { max_cost: None },
+        );
+        assert_eq!(rec.gate_exit, 0, "no net regression → exit 0");
     }
 
     #[test]

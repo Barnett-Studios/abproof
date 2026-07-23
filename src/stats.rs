@@ -121,6 +121,10 @@ pub struct WilcoxonResult {
     pub method: WilcoxonMethod,
 }
 
+/// Largest non-zero count for which the exact 2ⁿ sign-flip enumeration is used. Above this
+/// the normal approximation takes over (2^25 ≈ 34M sign assignments is the tractability ceiling).
+const EXACT_MAX_N: usize = 25;
+
 pub fn wilcoxon_signed_rank(deltas: &[f64]) -> WilcoxonResult {
     // Sort all |delta| including zeros (Pratt method).
     let mut abs_all: Vec<f64> = deltas.iter().map(|d| d.abs()).collect();
@@ -148,7 +152,6 @@ pub fn wilcoxon_signed_rank(deltas: &[f64]) -> WilcoxonResult {
     let mut w_plus = 0.0_f64;
     let mut w_minus = 0.0_f64;
     let mut nonzero_ranks: Vec<f64> = Vec::new();
-    let mut nonzero_abs: Vec<f64> = Vec::new();
 
     for (i, &d) in deltas.iter().enumerate() {
         if d == 0.0 {
@@ -161,7 +164,6 @@ pub fn wilcoxon_signed_rank(deltas: &[f64]) -> WilcoxonResult {
             w_minus += r;
         }
         nonzero_ranks.push(r);
-        nonzero_abs.push(d.abs());
     }
 
     let n_nonzero = nonzero_ranks.len();
@@ -178,16 +180,19 @@ pub fn wilcoxon_signed_rank(deltas: &[f64]) -> WilcoxonResult {
         };
     }
 
-    // Check for ties among non-zero |delta| values.
-    let has_ties = {
-        let mut sorted_abs = nonzero_abs.clone();
-        sorted_abs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        sorted_abs
-            .windows(2)
-            .any(|w| (w[0] - w[1]).abs() < f64::EPSILON * w[0].abs().max(1.0))
-    };
-
-    let use_exact = n_nonzero <= 25 && !has_ties;
+    // Route to the EXACT sign-flip enumeration whenever it is tractable (n ≤ 25),
+    // **including tied |delta|** (issue #7). The enumeration sums the actual observed Pratt
+    // ranks, so it is a valid exact randomization test with ties — and it is the *right*
+    // answer for the small batteries abproof runs. The earlier `!has_ties` guard sent every
+    // tied input (all real pass/fail data ties) to the normal approximation, whose −½
+    // continuity correction is calibrated for a unit-step statistic; under heavy ties W+
+    // moves in steps of (n+1)/2, so the approximation under-corrects and is anti-conservative
+    // near α (e.g. 5 unanimous ±1 nodes: approx 0.037 < 0.05 "significant" vs exact 0.0625
+    // "not" — a false gate failure at the honesty floor). The normal approximation is retained
+    // only for `n > 25`, where enumeration is intractable and the large-sample fit is close.
+    // ponytail: 2^25 enumeration ceiling; if batteries routinely exceed ~25 gradable nodes,
+    // swap the enumeration for the O(n·Σr) DP convolution rather than raising this bound.
+    let use_exact = n_nonzero <= EXACT_MAX_N;
 
     if use_exact {
         let p = exact_wilcoxon_p(w_plus, &nonzero_ranks);
@@ -200,7 +205,7 @@ pub fn wilcoxon_signed_rank(deltas: &[f64]) -> WilcoxonResult {
             method: WilcoxonMethod::ExactPratt,
         }
     } else {
-        let p = approx_wilcoxon_p(w_plus, n_nonzero, &nonzero_abs);
+        let p = approx_wilcoxon_p(w_plus, &nonzero_ranks);
         WilcoxonResult {
             w_plus,
             w_minus,
@@ -236,32 +241,28 @@ fn exact_wilcoxon_p(observed_w_plus: f64, nonzero_ranks: &[f64]) -> f64 {
     (count as f64 / total as f64).min(1.0)
 }
 
-/// Normal approximation with continuity correction and tie correction.
-fn approx_wilcoxon_p(w_plus: f64, n: usize, nonzero_abs: &[f64]) -> f64 {
-    let nf = n as f64;
-    let mu = nf * (nf + 1.0) / 4.0;
-
-    // Tie correction: sum over tie groups of non-zero |delta|.
-    let mut sorted_abs = nonzero_abs.to_vec();
-    sorted_abs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut tie_correction = 0.0_f64;
-    let mut i = 0;
-    while i < sorted_abs.len() {
-        let mut j = i + 1;
-        while j < sorted_abs.len()
-            && (sorted_abs[j] - sorted_abs[i]).abs() < f64::EPSILON * sorted_abs[i].abs().max(1.0)
-        {
-            j += 1;
-        }
-        let t = (j - i) as f64;
-        tie_correction += t * t * t - t;
-        i = j;
-    }
-
-    let base_var = nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0;
-    let sigma2 = base_var - tie_correction / 48.0;
-    let sigma = sigma2.max(0.0).sqrt();
+/// Normal approximation to the two-sided p-value, using the **sign-flip randomization
+/// moments** of W+.
+///
+/// Under the null "each non-zero delta is equally likely +/−", `W+ = Σ rᵢ·Bᵢ` with
+/// `Bᵢ ~ Bernoulli(½)` i.i.d. over the observed non-zero Pratt ranks `rᵢ`, so
+///
+/// ```text
+/// μ  = E[W+]   = Σ rᵢ / 2
+/// σ² = Var[W+] = Σ rᵢ² / 4
+/// ```
+///
+/// These are **exact for Pratt ranks with ties**: `Σrᵢ²/4` subsumes the separate
+/// tie-correction term, and using the actual `Σrᵢ` accounts for the zeros having consumed
+/// the low ranks. The prior `μ = n(n+1)/4`, `σ² = n(n+1)(2n+1)/24` are the *zero-free*
+/// moments — correct only when the ranks are exactly `1..n` (no zeros), which is precisely
+/// the case pass/fail deltas never satisfy. Matches
+/// `scipy.stats.wilcoxon(zero_method='pratt', correction=True, mode='approx')` to machine
+/// precision (issue #7; `tests/stats_golden.rs`).
+fn approx_wilcoxon_p(w_plus: f64, nonzero_ranks: &[f64]) -> f64 {
+    let mu = nonzero_ranks.iter().sum::<f64>() / 2.0;
+    let sigma2 = nonzero_ranks.iter().map(|r| r * r).sum::<f64>() / 4.0;
+    let sigma = sigma2.sqrt();
 
     if sigma == 0.0 {
         return 1.0;
@@ -519,7 +520,14 @@ mod tests {
         assert!((r.w_plus - 14.5).abs() < 1e-12, "w+={}", r.w_plus);
         assert!((r.w_minus - 10.5).abs() < 1e-12, "w-={}", r.w_minus);
         assert!((r.w - 10.5).abs() < 1e-12);
-        assert_eq!(r.method, WilcoxonMethod::NormalApproxPratt);
+        // Issue #7 / Option C: tie+zero data with n_nonzero ≤ 25 now takes the EXACT path
+        // (valid with ties), not the anti-conservative normal approximation.
+        assert_eq!(r.method, WilcoxonMethod::ExactPratt);
+        assert!(
+            (r.p_two_sided - 0.8125).abs() < 1e-12,
+            "exact randomization p={}",
+            r.p_two_sided
+        );
     }
 
     #[test]
