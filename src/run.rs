@@ -273,6 +273,29 @@ pub fn run_experiment(
                 .run(&manifest.treatment, &treatment_json, seed)
                 .unwrap_or_else(|_| failure_output());
 
+            // Issue #2 spike (gated, diagnostic-only): emit per-sample provisioning
+            // wall-time as a fraction of the TRUE per-rep wall-time — both arms of the
+            // pair summed, since a "rep" runs baseline AND treatment. Pure stderr
+            // telemetry that cannot touch gate/verdict/cost. The gate predicate and the
+            // fraction live in pure helpers (`bench_provision_should_emit`,
+            // `provision_fraction`) so both are unit-testable without a real model.
+            if bench_provision_should_emit(
+                std::env::var_os("ABPROOF_BENCH_PROVISION").is_some(),
+                std::env::var_os("EXECUTE_NODE_MOCK").is_some(),
+            ) {
+                let per_rep_total_ms = baseline_out.duration_ms + treatment_out.duration_ms;
+                for (arm_name, out) in [("baseline", &baseline_out), ("treatment", &treatment_out)]
+                {
+                    if let Some(frac) = provision_fraction(out, per_rep_total_ms) {
+                        eprintln!(
+                            "PROVISION_SAMPLE node={} rep={} arm={} provision_ms={} \
+                             per_rep_total_ms={} frac={:.4}",
+                            node.meta.id, rep, arm_name, out.provision_ms, per_rep_total_ms, frac
+                        );
+                    }
+                }
+            }
+
             for out in [&baseline_out, &treatment_out] {
                 if out.status != driver::RunStatus::Skipped {
                     any_non_skipped_run = true;
@@ -738,6 +761,43 @@ fn abort_record(
     }
 }
 
+/// Issue #2 spike gate predicate: whether the provisioning benchmark should emit
+/// `PROVISION_SAMPLE` lines, given whether the `ABPROOF_BENCH_PROVISION` flag and
+/// the `EXECUTE_NODE_MOCK` flag are set. Requesting the benchmark under the mock is
+/// a hard error: mock inference is near-instant, so provisioning would appear to be
+/// ~100% of wall-time and the resulting fraction would be garbage. Pure in its
+/// inputs (no env reads) so the panic path is unit-testable without mutating
+/// process-global state.
+fn bench_provision_should_emit(bench_requested: bool, mock_active: bool) -> bool {
+    if bench_requested {
+        assert!(
+            !mock_active,
+            "ABPROOF_BENCH_PROVISION requires a real model; refusing to emit \
+             provisioning fractions under EXECUTE_NODE_MOCK"
+        );
+    }
+    bench_requested
+}
+
+/// Issue #2 spike: the per-sample provisioning fraction for a single arm against
+/// the true per-rep denominator (both arms summed), or `None` when the arm carries
+/// no usable provisioning signal. Excluded (→ `None`): non-scorable arms
+/// (Skipped / Inconclusive / LocalUnavailable), arms where provisioning never ran
+/// (`provision_ms == 0`, i.e. a prebuilt `materialize: None` tree), and a zero
+/// denominator. These would otherwise poison the median in opposite directions.
+/// Pure — unit-testable on constructed `RunOutput`s.
+fn provision_fraction(out: &driver::RunOutput, per_rep_total_ms: u128) -> Option<f64> {
+    let scorable = matches!(
+        out.status,
+        driver::RunStatus::Success | driver::RunStatus::Failure
+    );
+    if scorable && out.provision_ms > 0 && per_rep_total_ms > 0 {
+        Some(out.provision_ms as f64 / per_rep_total_ms as f64)
+    } else {
+        None
+    }
+}
+
 fn arm_label(arm: &experiment::ArmConfig) -> String {
     let ctx = match arm.context {
         experiment::ContextStrategy::Cxpak => "cxpak",
@@ -759,6 +819,7 @@ fn failure_output() -> driver::RunOutput {
         claude_calls: 0,
         num_turns: 0,
         seeds_honoured: false,
+        provision_ms: 0,
     }
 }
 
@@ -845,6 +906,90 @@ mod tests {
         }
     }
 
+    // ── Issue #2 spike: provisioning-benchmark helpers ────────────────────────
+
+    /// Build a minimal `RunOutput` with a given status and provisioning time for
+    /// exercising the spike helpers. `duration_ms` is fixed so fractions are exact.
+    fn out_with(
+        status: driver::RunStatus,
+        provision_ms: u128,
+        duration_ms: u128,
+    ) -> driver::RunOutput {
+        driver::RunOutput {
+            status,
+            accept_passed: false,
+            edited_files: vec![],
+            stdout_tail: String::new(),
+            duration_ms,
+            cost_usd: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            claude_calls: 0,
+            num_turns: 0,
+            seeds_honoured: false,
+            provision_ms,
+        }
+    }
+
+    #[test]
+    fn provision_fraction_computes_for_scorable_materialized_arm() {
+        // 4 ms provisioning over a 200 ms per-rep total (both arms) → 0.02.
+        let out = out_with(driver::RunStatus::Success, 4, 100);
+        assert_eq!(provision_fraction(&out, 200), Some(0.02));
+        let failed = out_with(driver::RunStatus::Failure, 10, 100);
+        assert_eq!(provision_fraction(&failed, 200), Some(0.05));
+    }
+
+    #[test]
+    fn provision_fraction_excludes_non_scorable_and_zero_signal_arms() {
+        // Non-scorable statuses carry no usable provisioning signal.
+        for status in [
+            driver::RunStatus::Skipped,
+            driver::RunStatus::Inconclusive,
+            driver::RunStatus::LocalUnavailable,
+        ] {
+            assert_eq!(
+                provision_fraction(&out_with(status.clone(), 5, 100), 200),
+                None,
+                "non-scorable status {status:?} must be excluded"
+            );
+        }
+        // Prebuilt tree (materialize:None ⇒ provision_ms == 0) is excluded even when scorable.
+        assert_eq!(
+            provision_fraction(&out_with(driver::RunStatus::Success, 0, 100), 200),
+            None,
+            "provision_ms == 0 (prebuilt tree) must be excluded"
+        );
+        // Zero denominator must not divide.
+        assert_eq!(
+            provision_fraction(&out_with(driver::RunStatus::Success, 5, 0), 0),
+            None,
+            "zero per-rep total must be excluded"
+        );
+    }
+
+    #[test]
+    fn bench_provision_should_emit_gates_on_flag() {
+        assert!(
+            bench_provision_should_emit(true, false),
+            "flag set + real model → emit"
+        );
+        assert!(
+            !bench_provision_should_emit(false, false),
+            "flag unset → never emit"
+        );
+        // Flag unset under mock is fine (still no emit) — the guard only fires when requested.
+        assert!(!bench_provision_should_emit(false, true));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a real model")]
+    fn bench_provision_should_emit_refuses_mock() {
+        // Requesting the benchmark under EXECUTE_NODE_MOCK is a hard error: the
+        // fraction would be garbage (near-instant mock inference).
+        let _ = bench_provision_should_emit(true, true);
+    }
+
     // ── Cost test helpers ─────────────────────────────────────────────────────
 
     /// Scripted per-node output for cost tests.
@@ -904,6 +1049,7 @@ mod tests {
                 claude_calls,
                 num_turns,
                 seeds_honoured: true,
+                provision_ms: 0,
             })
         }
     }
@@ -1053,6 +1199,7 @@ mod tests {
                 claude_calls: 0,
                 num_turns: 0,
                 seeds_honoured: false,
+                provision_ms: 0,
             })
         }
     }
@@ -1090,6 +1237,7 @@ mod tests {
                 claude_calls: 0,
                 num_turns: 0,
                 seeds_honoured,
+                provision_ms: 0,
             })
         }
     }

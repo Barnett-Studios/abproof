@@ -247,6 +247,83 @@ fn local_node_driver_timeout_scores_inconclusive() {
     assert!(!out.accept_passed);
 }
 
+// ---------------------------------------------------------------------------
+// Contract test 3 (issue #2 spike): the in-driver materialize path records a
+// non-zero provisioning time that is a subset of the arm's total duration.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn local_node_driver_materialize_records_provision_time() {
+    // Unlike tests 1–2 (prebuilt tree via EXECUTE_NODE_ROOT), this exercises the
+    // in-driver `NodeWorkspace::create` path (materialize: Some), which is what
+    // issue #2 instruments. Skips cleanly when the executor is absent.
+    if !loop_available() {
+        eprintln!("skip: execute-node loop (Executor) absent — standalone build");
+        return;
+    }
+
+    let mock_dir = TempDir::new("lnd-mat-mock");
+    let mock = mock_dir.path().join("mock.txt");
+    fs::write(
+        &mock,
+        "calc.py\n<<<<<<< SEARCH\n    raise NotImplementedError\n=======\n    return a + b\n>>>>>>> REPLACE\n",
+    )
+    .expect("write mock.txt");
+
+    // The driver materializes this seed itself and points EXECUTE_NODE_ROOT at it,
+    // so no EXECUTE_NODE_ROOT is supplied by the arm.
+    let node = NodeJson {
+        id: "py-add-materialize".into(),
+        change: "Implement add".into(),
+        files: vec!["calc.py".into()],
+        accept: "python3 acceptance_test.py".into(),
+        forbid: vec![],
+        requires: vec![],
+        materialize: Some(abproof::worktree::MaterializeSpec {
+            files: vec![
+                (
+                    "calc.py".into(),
+                    "def add(a, b):\n    raise NotImplementedError\n".into(),
+                ),
+                (
+                    "acceptance_test.py".into(),
+                    "from calc import add\nassert add(2,3)==5\nprint('OK')\n".into(),
+                ),
+            ],
+        }),
+    };
+
+    let mut env = BTreeMap::new();
+    env.insert("EXECUTE_NODE_MOCK".to_string(), mock.display().to_string());
+    let arm = ArmConfig {
+        loop_name: "execute-node".into(),
+        model: "local-default".into(),
+        context: ContextStrategy::None,
+        env,
+        backend: Backend::Local,
+    };
+
+    let driver = LocalNodeDriver {
+        script: execute_node_script(),
+        timeout: Duration::from_secs(60),
+    };
+
+    let out = driver.run(&arm, &node, 1).expect("driver run");
+    assert_eq!(out.status, RunStatus::Success);
+    // Provisioning ran in-driver, so it must be measured (> 0) and must be a subset
+    // of the arm's total wall-time (create happens inside the timed region).
+    assert!(
+        out.provision_ms > 0,
+        "materialized run must record non-zero provisioning time"
+    );
+    assert!(
+        out.provision_ms <= out.duration_ms,
+        "provision_ms ({}) must not exceed duration_ms ({}) — it is a subset of the timed region",
+        out.provision_ms,
+        out.duration_ms
+    );
+}
+
 /// Locate the execute-node loop: $ABPROOF_EXECUTE_NODE, else walk up from CWD for
 /// skills/execute-node/execute_node.py (resolves inside a checkout).
 fn execute_node_path() -> std::path::PathBuf {

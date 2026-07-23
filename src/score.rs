@@ -280,6 +280,7 @@ mod tests {
             claude_calls: 0,
             num_turns: 0,
             seeds_honoured: false,
+            provision_ms: 0,
         };
         let no = RunOutput {
             status: RunStatus::Failure,
@@ -293,6 +294,7 @@ mod tests {
             claude_calls: 0,
             num_turns: 0,
             seeds_honoured: false,
+            provision_ms: 0,
         };
         assert_eq!(node_pass_score(&ok), 1.0);
         assert_eq!(node_pass_score(&no), 0.0);
@@ -317,6 +319,7 @@ mod tests {
                 claude_calls: 0,
                 num_turns: 0,
                 seeds_honoured: false,
+                provision_ms: 0,
             };
             assert_eq!(node_pass_score(&out), 0.0);
         }

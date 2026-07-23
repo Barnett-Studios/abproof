@@ -48,6 +48,15 @@ pub struct RunOutput {
     /// `LLM_SEED` actually drove the draw (seed honoured). False for greedy (temp 0)
     /// runs, where the seed is a no-op, and for mock runs.
     pub seeds_honoured: bool,
+    /// Wall-time of `NodeWorkspace::create` (RED work-tree provisioning) for this
+    /// arm, in milliseconds. Spike instrumentation for issue #2 (benchmark
+    /// provisioning before adopting CoW/overlay). `0` exactly when provisioning did
+    /// not run: `materialize` was `None` (prebuilt-tree arm) or the toolchain gate
+    /// short-circuited to Skipped before `create`. A timed-out (Inconclusive) arm
+    /// carries the real provisioning time — provisioning completed, the model spawn
+    /// did not — but is excluded from the gate by the scorable filter in `run.rs`.
+    /// Pure diagnostic telemetry — never enters the statistical gate.
+    pub provision_ms: u128,
 }
 
 /// Values parsed from a `USAGE ...` line emitted by execute_node.py.
@@ -156,6 +165,7 @@ impl SessionDriver for StubDriver {
             claude_calls: 0,
             num_turns: 0,
             seeds_honoured: false,
+            provision_ms: 0,
         })
     }
 }
@@ -316,6 +326,7 @@ impl SessionDriver for LocalNodeDriver {
                 claude_calls: 0,
                 num_turns: 0,
                 seeds_honoured: seeds_honoured_for(arm),
+                provision_ms: 0,
             });
         }
 
@@ -350,17 +361,23 @@ impl SessionDriver for LocalNodeDriver {
         // is infra (git broken) — it surfaces as DriverError, never a measured Failure.
         // The guard tears the tree down on every return path below. When `materialize`
         // is None the caller supplies EXECUTE_NODE_ROOT via arm.env (prebuilt-tree tests).
-        let workspace = match &node.materialize {
+        // Issue #2 spike: time ONLY the provisioning `create` call. The timer wraps
+        // nothing but `NodeWorkspace::create` — teardown (Drop) is excluded by
+        // construction, and the `None` (prebuilt-tree) arm carries no provisioning
+        // signal, so it reports `0`.
+        let (workspace, provision_ms) = match &node.materialize {
             Some(spec) => {
+                let prov_t0 = std::time::Instant::now();
                 let ws = crate::worktree::NodeWorkspace::create(spec)
                     .map_err(|e| DriverError::Io(format!("materialize work tree: {e}")))?;
+                let provision_ms = prov_t0.elapsed().as_millis();
                 env_map.insert(
                     "EXECUTE_NODE_ROOT".to_string(),
                     ws.root().display().to_string(),
                 );
-                Some(ws)
+                (Some(ws), provision_ms)
             }
-            None => None,
+            None => (None, 0),
         };
 
         cmd.env_clear();
@@ -417,6 +434,7 @@ impl SessionDriver for LocalNodeDriver {
                     claude_calls: 0,
                     num_turns: 0,
                     seeds_honoured: seeds_honoured_for(arm),
+                    provision_ms,
                 })
             }
             Ok(Err(e)) => Err(DriverError::Io(format!("wait for execute_node.py: {e}"))),
@@ -466,6 +484,7 @@ impl SessionDriver for LocalNodeDriver {
                     claude_calls: usage.claude_calls,
                     num_turns: usage.num_turns,
                     seeds_honoured: seeds_honoured_for(arm),
+                    provision_ms,
                 })
             }
         }
@@ -747,6 +766,12 @@ mod tests {
             out.stdout_tail.contains("definitely-not-a-real-tool-xyz"),
             "stdout_tail must name the missing tool; got: {:?}",
             out.stdout_tail
+        );
+        // Issue #2 spike: the Skipped early-return short-circuits before any
+        // provisioning, so provision_ms must be 0 (no signal to attribute).
+        assert_eq!(
+            out.provision_ms, 0,
+            "Skipped short-circuit runs no provisioning; provision_ms must be 0"
         );
     }
 
