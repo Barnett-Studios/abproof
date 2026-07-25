@@ -204,8 +204,12 @@ fn stub_driver_treatment_passes_gate_exit_0() {
 }
 
 #[test]
-fn stub_driver_treatment_fails_gate_exit_1() {
-    // Both arms fail → treatment node_pass_rate = 0.0 < floor 0.5 → gate_exit = 1.
+fn stub_driver_single_node_worse_is_underpowered_exit_0() {
+    // Treatment fails, baseline succeeds → the point estimate is worse. But this battery
+    // is a SINGLE node (py-add), so after per-node aggregation (issue #7, D2) the paired
+    // test has n=1 and can never reach significance (p=1.0). The gate therefore honestly
+    // reports "not a confirmed regression" (exit 0) rather than the old pseudo-replicated
+    // false exit 1 that treated the 5 reps of one node as 5 independent observations.
     let manifest = small_manifest();
     let nodes = load_py_add();
     let (driver, _) = ArmDistinctDriver::new(false, true);
@@ -220,9 +224,26 @@ fn stub_driver_treatment_fails_gate_exit_1() {
         &baseline,
         &run::RunOptions::default(),
     );
+    let row = rec
+        .rows
+        .iter()
+        .find(|r| r.metric == "node_pass_rate")
+        .expect("gated row must exist");
     assert_eq!(
-        rec.gate_exit, 1,
-        "treatment fails floor → gate_exit = 1 (regression)"
+        row.n_nonzero,
+        Some(1),
+        "one node → one per-node delta, not reps"
+    );
+    assert!(row.delta < 0.0, "point estimate is worse (treatment lost)");
+    assert!(
+        (row.p_two_sided.unwrap() - 1.0).abs() < 1e-9,
+        "single node cannot be significant; p={:?}",
+        row.p_two_sided
+    );
+    assert_eq!(
+        rec.gate_exit, 0,
+        "underpowered single node → not a confirmed regression (see \
+         run::tests::e2e_confirmed_regression_over_enough_nodes_exits_1 for the exit-1 path)"
     );
 }
 
@@ -254,52 +275,40 @@ fn pairs_formed_per_node_rep_call_count() {
 
 #[test]
 fn gated_row_verdict_matches_gate_exit() {
-    // When gate_exit = 0, the gated row verdict must be Some(true).
-    // When gate_exit = 1, the gated row verdict must be Some(false).
+    // Invariant: the gated row's verdict is exactly `Some(gate_exit == 0)` — a PASS row
+    // reports Some(true), a regression row Some(false). Exercised here over the two
+    // single-node scenarios the fixture supports (both exit 0 after the D2 fix, since one
+    // node is underpowered); the exit-1 / Some(false) branch is covered with a multi-node
+    // battery in run::tests::e2e_confirmed_regression_over_enough_nodes_exits_1.
     let manifest = small_manifest();
     let nodes = load_py_add();
     let baseline = baseline_floor_05();
     let judge = canned_judge();
 
-    let (pass_driver, _) = ArmDistinctDriver::new(true, false);
-    let rec_pass = run::run_experiment(
-        &manifest,
-        &nodes,
-        &pass_driver,
-        &judge,
-        &baseline,
-        &run::RunOptions::default(),
-    );
-    let row_pass = rec_pass
-        .rows
-        .iter()
-        .find(|r| r.metric == "node_pass_rate")
-        .unwrap();
-    assert_eq!(
-        row_pass.verdict,
-        Some(true),
-        "PASS: verdict must be Some(true)"
-    );
-
-    let (fail_driver, _) = ArmDistinctDriver::new(false, true);
-    let rec_fail = run::run_experiment(
-        &manifest,
-        &nodes,
-        &fail_driver,
-        &judge,
-        &baseline,
-        &run::RunOptions::default(),
-    );
-    let row_fail = rec_fail
-        .rows
-        .iter()
-        .find(|r| r.metric == "node_pass_rate")
-        .unwrap();
-    assert_eq!(
-        row_fail.verdict,
-        Some(false),
-        "FAIL: verdict must be Some(false)"
-    );
+    for (label, treatment_ok, baseline_ok) in [
+        ("treatment-better", true, false),
+        ("treatment-worse", false, true),
+    ] {
+        let (driver, _) = ArmDistinctDriver::new(treatment_ok, baseline_ok);
+        let rec = run::run_experiment(
+            &manifest,
+            &nodes,
+            &driver,
+            &judge,
+            &baseline,
+            &run::RunOptions::default(),
+        );
+        let row = rec
+            .rows
+            .iter()
+            .find(|r| r.metric == "node_pass_rate")
+            .unwrap();
+        assert_eq!(
+            row.verdict,
+            Some(rec.gate_exit == 0),
+            "{label}: verdict must equal Some(gate_exit == 0)"
+        );
+    }
 }
 
 #[test]

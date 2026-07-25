@@ -13,8 +13,9 @@ the **same executor** twice — baseline vs. treatment — over a corpus of RED-
 tasks, with seed-blocked pairing, task-typed scoring, and a gate that only fails a run when the
 regression is both beyond tolerance and statistically significant (paired Wilcoxon, α = 0.05 by
 default) — not a bare point estimate. A worse-but-noisy result honestly exits PASS rather than
-failing on chance; an underpowered run is a validity problem for the *experiment* (raise `reps`),
-not something the gate silently papers over.
+failing on chance; an underpowered run is a validity problem for the *experiment* (the node is the
+unit of replication, so power comes from a **larger battery** — `reps` only sharpen each node's
+rate), not something the gate silently papers over.
 
 Unlike a prompt-eval framework, abproof A/Bs the **whole assembly running a real loop**, not a
 single model call — the executor is the arm.
