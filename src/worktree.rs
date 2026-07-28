@@ -244,4 +244,92 @@ mod tests {
         };
         assert!(!root.exists(), "workspace dir must be removed on drop");
     }
+
+    /// Percentile of a sorted slice via nearest-rank (p in [0,100]).
+    fn pct(sorted: &[u128], p: u128) -> u128 {
+        if sorted.is_empty() {
+            return 0;
+        }
+        let rank = ((p * (sorted.len() as u128 - 1)) / 100) as usize;
+        sorted[rank]
+    }
+
+    /// Issue #2 spike (measurement, not a shipped feature): the isolated provisioning
+    /// *ceiling* — how fast `NodeWorkspace::create` + `Drop` can go back-to-back with
+    /// warm caches. This is a BEST-CASE number: looping warms git's object/dentry/inode
+    /// caches, so real per-rep cost (each rep interleaved with a heavy model spawn on a
+    /// colder path) is higher. Reported alongside the in-run fraction, never used as the
+    /// gate on its own. `#[ignore]`d: run manually with
+    /// `cargo test -- --ignored bench_provision_ceiling --nocapture`.
+    #[test]
+    #[ignore = "spike: manual provisioning ceiling benchmark; run with --ignored --nocapture"]
+    fn bench_provision_ceiling() {
+        let spec = spec();
+        let iters: usize = 100;
+        let mut create_us: Vec<u128> = Vec::with_capacity(iters);
+        let mut drop_us: Vec<u128> = Vec::with_capacity(iters);
+        for i in 0..iters {
+            let t0 = std::time::Instant::now();
+            let ws = NodeWorkspace::create(&spec).expect("create");
+            let create = t0.elapsed().as_micros();
+            let d0 = std::time::Instant::now();
+            drop(ws);
+            let drop_e = d0.elapsed().as_micros();
+            // Discard iteration 0: first git/spawn warmup is not representative.
+            if i == 0 {
+                continue;
+            }
+            create_us.push(create);
+            drop_us.push(drop_e);
+        }
+        assert!(
+            create_us.len() >= 2,
+            "need at least 2 post-warmup samples; got {}",
+            create_us.len()
+        );
+        create_us.sort_unstable();
+        drop_us.sort_unstable();
+        let summary = format!(
+            "PROVISION_CEILING samples={} \
+             create_us(min/median/p90/max)={}/{}/{}/{} \
+             drop_us(min/median/p90/max)={}/{}/{}/{} \
+             (WARM-CACHE BEST CASE — real per-rep cost is higher; \
+             compare against PROVISION_SAMPLE frac from a real-model run)",
+            create_us.len(),
+            create_us[0],
+            pct(&create_us, 50),
+            pct(&create_us, 90),
+            create_us[create_us.len() - 1],
+            drop_us[0],
+            pct(&drop_us, 50),
+            pct(&drop_us, 90),
+            drop_us[drop_us.len() - 1],
+        );
+        eprintln!("{summary}");
+        assert!(
+            summary.contains("PROVISION_CEILING") && summary.contains("create_us"),
+            "summary must carry the diagnostic markers; got: {summary}"
+        );
+    }
+
+    /// Guards the ceiling bench's cleanup contract cheaply (3 iters, always run):
+    /// every `create` must be balanced by its `Drop`. Tracks the exact directories
+    /// this test creates — counting by the shared `abproof-wt-<pid>-` prefix would
+    /// be racy, since sibling `worktree` tests share the PID and run in parallel.
+    #[test]
+    fn provision_bench_leaves_no_residue() {
+        let mut roots = Vec::new();
+        for _ in 0..3 {
+            let ws = NodeWorkspace::create(&spec()).expect("create");
+            roots.push(ws.root().to_path_buf());
+            drop(ws);
+        }
+        for root in roots {
+            assert!(
+                !root.exists(),
+                "each create must be balanced by its Drop — {} must not persist",
+                root.display()
+            );
+        }
+    }
 }
