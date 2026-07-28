@@ -113,11 +113,63 @@ pub fn parse_status_line(last_line: &str) -> RunStatus {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DriverError {
     #[error("{0}")]
     Spawn(String),
     #[error("{0}")]
     Io(String),
+    /// A corpus-authored `node.id` that is not a slug. Refused, never rewritten
+    /// — see [`temp_node_path`].
+    #[error("{0}")]
+    InvalidNode(String),
+}
+
+/// Temp path for a node's serialized JSON, with the corpus-authored `node.id`
+/// **validated rather than sanitized**.
+///
+/// `node.id` comes from corpus `meta.yaml` — the same producer whose `meta.files`
+/// `worktree.rs` already treats as untrusted. This is the RC-1 trust boundary
+/// (ADR-0056 rule 7), and the rule is reject, not rewrite: abproof is a measurement
+/// instrument, so an id of `a/b` quietly becoming `a_b` would mean the run, its temp
+/// artifact, and every report derived from them describe a node identity that is not
+/// in the corpus. A malformed corpus entry is a curation defect to surface, not to
+/// paper over.
+///
+/// Charset matches the producer's `id` rule (ADR-0056 rule 1) so the twins agree on
+/// what a legal id is, and the wording matches `dotclaude-measure`'s `temp_node_path`
+/// so rule 6's lockstep claim holds in fact.
+///
+/// One deliberate difference from the twin **as currently written**: this enforces the
+/// documented pattern's first character too. The twin's doc comment states
+/// `[A-Za-z0-9][A-Za-z0-9._-]*` but its code only rejects a leading `.`, so `-rf` passes
+/// there and is refused here. The regex is the contract both claim to implement, and an
+/// id that leads with `-` reads as a flag to anything downstream that ever puts it in an
+/// argv. Flagged upstream so lockstep is restored on that side rather than loosened on
+/// this one.
+///
+/// Extraction is part of the fix: the path used to be built inline inside
+/// `LocalNodeDriver::run`, where no test could reach it.
+fn temp_node_path(node_id: &str, counter: u64) -> Result<PathBuf, DriverError> {
+    let legal = node_id
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && node_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !legal {
+        return Err(DriverError::InvalidNode(format!(
+            "corpus node.id {node_id:?} is not a slug ([A-Za-z0-9][A-Za-z0-9._-]*) — \
+             refused rather than rewritten, which would run the node under an identity \
+             that is not in the corpus"
+        )));
+    }
+    // Counter first, so the constant `abproof-node-{counter}-` prefix owns the whole
+    // first path component. Defence in depth behind the check above, not a substitute
+    // for it: with the id first (as it was), a separator in `node_id` split the prefix
+    // and the leading component stopped being constant.
+    Ok(std::env::temp_dir().join(format!("abproof-node-{counter}-{node_id}.json")))
 }
 
 pub trait SessionDriver {
@@ -325,7 +377,7 @@ impl SessionDriver for LocalNodeDriver {
         let node_json = serde_json::to_string(node)
             .map_err(|e| DriverError::Io(format!("serialize node: {e}")))?;
         let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_path = std::env::temp_dir().join(format!("abproof-node-{}-{id}.json", node.id));
+        let temp_path = temp_node_path(&node.id, id)?;
         std::fs::write(&temp_path, &node_json)
             .map_err(|e| DriverError::Io(format!("write node temp: {e}")))?;
         let _temp_guard = TempFile(temp_path.clone());
@@ -777,5 +829,116 @@ mod tests {
             is_not_skipped,
             "present required tool must not produce Skipped; result={result:?}"
         );
+    }
+
+    // ── RC-1 / ADR-0056 rule 7: corpus-authored node.id must not steer the temp path ──
+    //
+    // `node.id` reaches a filesystem sink straight from corpus `meta.yaml`. The twin in
+    // `dotclaude-measure` carries the identical guard; these assertions mirror its
+    // coverage and extend it, because the two crates must refuse the same inputs
+    // (rule 6) — one refusing and the other rewriting is exactly the drift the lockstep
+    // rule exists to prevent.
+
+    #[test]
+    fn rc1_temp_node_path_rejects_hostile_ids() {
+        for hostile in [
+            "../../evil",
+            "/etc/passwd",
+            "a/b",
+            "..",
+            "evil\n",
+            "a\0b",
+            // Beyond the twin's list — same class, different disguise.
+            "",        // empty: joins to a bare "abproof-node-0-.json", identity-less
+            ".",       // current dir
+            ".hidden", // leading dot: a dotfile is not a corpus node id
+            "a\\b",    // Windows separator
+            "~",       // shell-expanded elsewhere in the pipeline
+            "$HOME",
+            "a b",      // whitespace: survives fs, breaks every shell that sees it
+            "-rf",      // leads with a dash: reads as a flag to anything downstream
+            "\u{5c0f}", // non-ASCII, even though it is filesystem-legal
+        ] {
+            let r = temp_node_path(hostile, 0);
+            assert!(
+                r.is_err(),
+                "node.id {hostile:?} must be REJECTED, not silently rewritten — a \
+                 measurement instrument that renames its inputs reports results under \
+                 an identity that never existed (ADR-0056)"
+            );
+        }
+    }
+
+    #[test]
+    fn rc1_temp_node_path_rejection_names_the_offending_id() {
+        let err = temp_node_path("a/b", 0).expect_err("must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("a/b"),
+            "the error must name the rejected id so a bad corpus entry is findable; got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn rc1_temp_node_path_stays_in_temp_dir() {
+        // Guard against the rejection tests passing by rejecting *everything*: legal ids
+        // must still be accepted, and must land directly in temp_dir().
+        let tmp = std::env::temp_dir();
+        for legit in [
+            "legit-id",
+            "N1-surprising-cochange",
+            "a",
+            "A.B_C-1",
+            "0",
+            "node.v2",
+        ] {
+            let p = temp_node_path(legit, 0).expect("a slug id is accepted");
+            assert_eq!(
+                p.parent(),
+                Some(tmp.as_path()),
+                "accepted ids must still land in temp_dir(): {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rc1_temp_node_path_keeps_ordinary_ids_readable() {
+        let p = temp_node_path("N1-surprising-cochange", 7).expect("legitimate slug id");
+        assert!(
+            p.to_string_lossy()
+                .ends_with("abproof-node-7-N1-surprising-cochange.json"),
+            "validation must not mangle a legitimate slug id: {p:?}"
+        );
+    }
+
+    #[test]
+    fn rc1_hostile_node_id_is_refused_by_the_driver_not_just_the_seam() {
+        // The seam is only worth having if `run` actually goes through it. Drives the
+        // real `LocalNodeDriver` and asserts it refuses BEFORE the script spawn — the
+        // script path is deliberately nonexistent, so a Spawn error would prove the
+        // guard was bypassed and the write already happened.
+        let driver = LocalNodeDriver {
+            script: PathBuf::from("/nonexistent/execute_node.py"),
+            timeout: Duration::from_secs(30),
+        };
+        let node = NodeJson {
+            id: "../../evil".into(),
+            change: "x".into(),
+            files: vec![],
+            accept: "true".into(),
+            forbid: vec![],
+            requires: vec![],
+            materialize: None,
+        };
+        match driver.run(&any_arm(), &node, 42) {
+            Err(DriverError::InvalidNode(msg)) => assert!(
+                msg.contains("../../evil"),
+                "must name the offending id; got {msg:?}"
+            ),
+            other => panic!(
+                "a hostile node.id must be refused by the driver itself, before any \
+                 filesystem write or process spawn; got {other:?}"
+            ),
+        }
     }
 }
