@@ -9,6 +9,9 @@ use std::time::Duration;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// ADR-0056 rule 1's length bound, mirroring `ID_MAX_LEN` in the producer twins.
+const ID_MAX_LEN: usize = 100;
+
 /// Measurement sampling temperature. The harness pins this (> 0) for local runs
 /// so the per-rep `LLM_SEED` actually drives the draw — at temp 0 the seed is a
 /// no-op and every rep collapses to the identical greedy output (degenerate
@@ -140,29 +143,34 @@ pub enum DriverError {
 /// what a legal id is, and the wording matches `dotclaude-measure`'s `temp_node_path`
 /// so rule 6's lockstep claim holds in fact.
 ///
-/// One deliberate difference from the twin **as currently written**: this enforces the
-/// documented pattern's first character too. The twin's doc comment states
-/// `[A-Za-z0-9][A-Za-z0-9._-]*` but its code only rejects a leading `.`, so `-rf` passes
-/// there and is refused here. The regex is the contract both claim to implement, and an
-/// id that leads with `-` reads as a flag to anything downstream that ever puts it in an
-/// argv. Flagged upstream so lockstep is restored on that side rather than loosened on
-/// this one.
+/// This implements the documented pattern in full — first character alphanumeric,
+/// `[A-Za-z0-9._-]` after it, at most `ID_MAX_LEN` characters. The consumer twin's code
+/// implemented neither clause (it rejected only a leading `.`, so `-rf` passed, and no
+/// twin enforced the length), which is the drift filed as dotclaude#47 and fixed there in
+/// lockstep with this. Both sides are now judged against the same corpus —
+/// `tests/id-guard/vectors.json` here, byte-identical upstream — so the next divergence
+/// fails a test instead of waiting for a port to notice it.
 ///
 /// Extraction is part of the fix: the path used to be built inline inside
 /// `LocalNodeDriver::run`, where no test could reach it.
 fn temp_node_path(node_id: &str, counter: u64) -> Result<PathBuf, DriverError> {
-    let legal = node_id
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric())
+    // `chars().count()`, not `len()`: the Python producer's `len()` counts characters, and
+    // a twin pair that disagrees about what "100" measures is drift waiting to happen.
+    // Every non-ASCII id is rejected by the charset clause regardless, so this changes no
+    // verdict today — it keeps the implementations saying the same thing.
+    let legal = node_id.chars().count() <= ID_MAX_LEN
+        && node_id
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
         && node_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
     if !legal {
         return Err(DriverError::InvalidNode(format!(
-            "corpus node.id {node_id:?} is not a slug ([A-Za-z0-9][A-Za-z0-9._-]*) — \
-             refused rather than rewritten, which would run the node under an identity \
-             that is not in the corpus"
+            "corpus node.id {node_id:?} is not a slug ([A-Za-z0-9][A-Za-z0-9._-]*, at most \
+             {ID_MAX_LEN} characters) — refused rather than rewritten, which would run the \
+             node under an identity that is not in the corpus"
         )));
     }
     // Counter first, so the constant `abproof-node-{counter}-` prefix owns the whole
@@ -908,6 +916,69 @@ mod tests {
             p.to_string_lossy()
                 .ends_with("abproof-node-7-N1-surprising-cochange.json"),
             "validation must not mangle a legitimate slug id: {p:?}"
+        );
+    }
+
+    /// One corpus, every guard (dotclaude#48).
+    ///
+    /// `tests/id-guard/vectors.json` is a **byte-identical** copy of the family's canonical
+    /// corpus (`conformance/corpus/id-guard/vectors.json` in the consumer repo, where the
+    /// Rust and Python twins run the same file). The consumer's CI diffs this copy against
+    /// the canonical one, so weakening a vector here cannot be a quiet local decision — and
+    /// a guard that is stricter or laxer than its sibling fails a test rather than a review,
+    /// which is how the leading-`-` drift went unnoticed until it was ported.
+    ///
+    /// Verdicts, not messages: error-text parity is asserted by
+    /// `rc1_temp_node_path_rejection_names_the_offending_id` and its twin.
+    #[test]
+    fn adr0056_every_id_in_the_shared_corpus_gets_the_corpus_verdict() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/id-guard/vectors.json");
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("shared id corpus unreadable at {path}: {e}"));
+        let doc: serde_json::Value =
+            serde_json::from_str(&raw).expect("shared id corpus is not valid JSON");
+        let vectors = doc["vectors"]
+            .as_array()
+            .expect("shared id corpus has no `vectors` array");
+
+        // Vacuity guards. A corpus that shrank to nothing, or to rejects only, would let a
+        // guard that refuses every id — including legitimate ones — pass this test.
+        assert!(
+            vectors.len() >= 20,
+            "the shared corpus lost coverage: {} vectors",
+            vectors.len()
+        );
+        let accepts = vectors.iter().filter(|v| v["verdict"] == "accept").count();
+        assert!(
+            accepts >= 5,
+            "the shared corpus has only {accepts} accept vectors — a reject-everything \
+             guard would pass vacuously"
+        );
+
+        let mut wrong = Vec::new();
+        for v in vectors {
+            let id = v["id"].as_str().expect("every vector needs a string `id`");
+            let want = v["verdict"]
+                .as_str()
+                .expect("every vector needs a `verdict`");
+            let got = if temp_node_path(id, 0).is_ok() {
+                "accept"
+            } else {
+                "reject"
+            };
+            if got != want {
+                let why = v["why"].as_str().unwrap_or("");
+                wrong.push(format!(
+                    "  id={id:?}: corpus says {want}, this twin says {got} — {why}"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "this twin disagrees with the shared ADR-0056 corpus on {} id(s) — that is the \
+             drift rule 6 exists to prevent:\n{}",
+            wrong.len(),
+            wrong.join("\n")
         );
     }
 
