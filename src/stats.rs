@@ -560,6 +560,82 @@ mod tests {
         assert!((z - 5.4655).abs() < 0.01, "z≈{z}");
     }
 
+    // Issue #3: minimum attainable p (the power floor)
+
+    #[test]
+    fn min_attainable_p_is_two_over_two_to_the_n() {
+        // The most extreme deviation |W+ − μ| = Σr/2 is reached by exactly two of the
+        // 2ⁿ sign assignments (all-plus and all-minus), so the floor is 2/2ⁿ whatever
+        // the rank values are.
+        assert_eq!(min_attainable_p(0), 1.0, "no non-zero pairs → no signal");
+        assert_eq!(min_attainable_p(1), 1.0);
+        assert_eq!(min_attainable_p(2), 0.5);
+        assert_eq!(min_attainable_p(4), 0.125);
+        assert_eq!(min_attainable_p(5), 0.0625);
+        assert_eq!(min_attainable_p(6), 0.03125);
+    }
+
+    #[test]
+    fn min_attainable_p_brackets_alpha_at_n_six() {
+        // The operative fact behind the guard: α = 0.05 is unreachable at n ≤ 5 and
+        // reachable from n = 6 up.
+        const ALPHA: f64 = 0.05;
+        for n in 0..=5 {
+            assert!(
+                min_attainable_p(n) > ALPHA,
+                "n={n} must be incapable of reaching alpha"
+            );
+        }
+        for n in 6..=25 {
+            assert!(
+                min_attainable_p(n) <= ALPHA,
+                "n={n} must be capable of reaching alpha"
+            );
+        }
+    }
+
+    #[test]
+    fn min_attainable_p_agrees_with_the_enumeration_it_bounds() {
+        // Cross-check against the real exact test rather than trusting the closed form:
+        // a unanimous all-positive battery achieves exactly the floor, and nothing can
+        // go below it.
+        for n in 1..=12_usize {
+            let deltas: Vec<f64> = (1..=n).map(|i| i as f64).collect();
+            let r = wilcoxon_signed_rank(&deltas);
+            assert_eq!(r.method, WilcoxonMethod::ExactPratt);
+            assert!(
+                (r.p_two_sided - min_attainable_p(n)).abs() < 1e-12,
+                "n={n}: unanimous p={} must equal the floor {}",
+                r.p_two_sided,
+                min_attainable_p(n)
+            );
+            assert!(
+                (r.min_attainable_p - min_attainable_p(n)).abs() < 1e-12,
+                "n={n}: the result must carry its own floor"
+            );
+        }
+    }
+
+    #[test]
+    fn min_attainable_p_never_exceeds_the_realised_p() {
+        // A floor that a real result can dip below is not a floor.
+        let cases: Vec<Vec<f64>> = vec![
+            vec![1.0, -2.0, 3.0, 4.0, -5.0],
+            vec![0.0, 0.0, 1.0, -1.0, 2.0, 2.0, -3.0],
+            vec![1.0; 9],
+            vec![-1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0],
+        ];
+        for deltas in cases {
+            let r = wilcoxon_signed_rank(&deltas);
+            assert!(
+                r.p_two_sided >= r.min_attainable_p - 1e-12,
+                "p={} dipped below its floor {} for {deltas:?}",
+                r.p_two_sided,
+                r.min_attainable_p
+            );
+        }
+    }
+
     // Step 7: Mann-Whitney U
 
     #[test]

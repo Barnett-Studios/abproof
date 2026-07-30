@@ -532,6 +532,115 @@ mod tests {
         assert_eq!(widened_verdicts[0].alpha, 0.10);
     }
 
+    // ── #3: minimum-power guard ───────────────────────────────────────────────
+
+    #[test]
+    fn gate_underpowered_when_alpha_is_unreachable() {
+        // 5 non-zero pairs: the exact two-sided floor is 0.0625 > alpha 0.05. Even the
+        // unanimous best case cannot fail this gate, so the verdict must be the distinct
+        // UNDERPOWERED, never PASS.
+        let v = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.60),
+            Some(0.0625),
+            Some(5),
+        );
+        assert_eq!(v[0].outcome, GateOutcome::Underpowered);
+        assert_ne!(v[0].outcome, GateOutcome::Pass);
+        assert_eq!(v[0].n_nonzero, Some(5));
+        assert_eq!(v[0].min_attainable_p, Some(0.0625));
+        assert_eq!(exit_code(&v), EXIT_UNDERPOWERED);
+    }
+
+    #[test]
+    fn gate_underpowered_even_when_the_point_estimate_improved() {
+        // Direction is irrelevant to power: a battery that could not have detected a
+        // regression did not establish its absence just because treatment looked better.
+        let v = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.90),
+            Some(1.0),
+            Some(3),
+        );
+        assert_eq!(v[0].outcome, GateOutcome::Underpowered);
+        assert_eq!(exit_code(&v), EXIT_UNDERPOWERED);
+    }
+
+    #[test]
+    fn gate_zero_discordant_pairs_is_underpowered_not_pass() {
+        // Every pair tied → n_nonzero 0 → floor 1.0. The arms were indistinguishable on
+        // this battery; that is an absence of evidence, not evidence of absence.
+        let v = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.70),
+            Some(1.0),
+            Some(0),
+        );
+        assert_eq!(v[0].outcome, GateOutcome::Underpowered);
+        assert_eq!(v[0].n_nonzero, Some(0));
+    }
+
+    #[test]
+    fn gate_powered_battery_still_confirms_and_still_passes() {
+        // 6 non-zero pairs → floor 0.03125 ≤ 0.05: the guard stands aside entirely and
+        // both real verdicts remain reachable.
+        let regressed = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.60),
+            Some(0.03125),
+            Some(6),
+        );
+        assert_eq!(regressed[0].outcome, GateOutcome::Fail);
+        assert_eq!(exit_code(&regressed), 1);
+
+        let clean = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.80),
+            Some(0.03125),
+            Some(6),
+        );
+        assert_eq!(clean[0].outcome, GateOutcome::Pass);
+        assert_eq!(exit_code(&clean), 0);
+    }
+
+    #[test]
+    fn gate_underpowered_and_regressed_are_mutually_exclusive() {
+        // Structural invariant: `p < alpha` is impossible when the floor already exceeds
+        // alpha, so no verdict can ever be both. If this ever fires, the two rules have
+        // drifted apart and `outcome` is decided by evaluation order rather than by maths.
+        for n in 0..=25_usize {
+            for &p in &[0.0, 0.001, 0.03, 0.05, 0.5, 1.0] {
+                let v = gate(
+                    &manifest_070_tol0(),
+                    &agg(0.70),
+                    &agg(0.10),
+                    Some(p),
+                    Some(n),
+                );
+                let underpowered = v[0].outcome == GateOutcome::Underpowered;
+                assert!(
+                    !(underpowered && v[0].regressed),
+                    "n={n} p={p}: a battery cannot be both underpowered and a confirmed regression"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gate_without_a_pair_count_keeps_the_point_estimate_fallback() {
+        // No paired series (`None`) → no power claim either way; the pre-existing
+        // point-estimate behaviour is preserved unchanged.
+        let v = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), None, None);
+        assert_eq!(v[0].outcome, GateOutcome::Fail);
+        assert_eq!(v[0].min_attainable_p, None);
+        assert_eq!(exit_code(&v), 1);
+    }
+
     // ── D3: gate contrast is the in-run baseline arm, not the committed baseline ──
 
     #[test]
