@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "Canonical adversarial corpus for ADR-0056 rule 1 (node id is a slug), run through EVERY",
+    "id guard in the family so rule 6/7's lockstep is a mechanical invariant instead of a",
+    "review-time hope. dotclaude#48.",
+    "",
+    "Consumers (each asserts the same verdict for the same id, in its own CI):",
+    "  - crates/dotclaude-measure/src/driver.rs::temp_node_path   (Rust,   this repo)",
+    "  - skills/execute-plan/plan_to_nodes.py::validate_entry     (Python, this repo)",
+    "  - abproof/src/driver.rs::temp_node_path                    (Rust,   vendored copy)",
+    "  - slicr/plan_to_nodes.py::validate_entry                   (Python, constants checked",
+    "    against `rule` by scripts/verify-twin-lockstep.py — that repo vendors nothing)",
+    "",
+    "Verdicts only. Error TEXT parity is a per-twin-pair requirement (rule 7) and is asserted",
+    "in each pair's own tests; across languages the messages legitimately differ.",
+    "",
+    "This file is the shared artifact. A vendored copy that differs from this one fails",
+    "scripts/verify-twin-lockstep.py, which is the point: weakening the corpus in one repo",
+    "must not be a quiet local decision."
+  ],
+  "rule": {
+    "adr": "ADR-0056 rule 1",
+    "pattern": "[A-Za-z0-9][A-Za-z0-9._-]*",
+    "max_len": 100,
+    "match": "fullmatch"
+  },
+  "vectors": [
+    { "verdict": "accept", "id": "a", "why": "minimal legal id" },
+    { "verdict": "accept", "id": "py-add", "why": "real corpus node" },
+    { "verdict": "accept", "id": "python-01-compact-path", "why": "real corpus node" },
+    { "verdict": "accept", "id": "N1-surprising-cochange", "why": "real production id; a lowercase-only pattern would wrongly reject it" },
+    { "verdict": "accept", "id": "0", "why": "a leading digit is alphanumeric" },
+    { "verdict": "accept", "id": "a.b_c-d", "why": "every legal punctuation character, none of them leading" },
+    { "verdict": "accept", "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "why": "exactly 100 characters — the boundary is inclusive" },
+
+    { "verdict": "reject", "id": "", "why": "empty: there is no first character to be alphanumeric" },
+    { "verdict": "reject", "id": ".", "why": "the current directory" },
+    { "verdict": "reject", "id": "..", "why": "the parent directory" },
+    { "verdict": "reject", "id": "../../evil", "why": "traversal" },
+    { "verdict": "reject", "id": ".hidden", "why": "leading dot" },
+    { "verdict": "reject", "id": "-rf", "why": "leading dash: reads as a flag to anything that puts a bare id in an argv (dotclaude#47)" },
+    { "verdict": "reject", "id": "-", "why": "a lone dash is both leading-punctuation and a stdin sentinel" },
+    { "verdict": "reject", "id": "_x", "why": "leading underscore: legal in the charset, illegal as a first character" },
+    { "verdict": "reject", "id": "a/b", "why": "path separator" },
+    { "verdict": "reject", "id": "/etc/passwd", "why": "absolute path" },
+    { "verdict": "reject", "id": "a\\b", "why": "backslash separator" },
+    { "verdict": "reject", "id": "a b", "why": "space" },
+    { "verdict": "reject", "id": "a\u0000b", "why": "NUL truncates the path at the syscall boundary" },
+    { "verdict": "reject", "id": "evil\n", "why": "trailing newline — why the Python side uses fullmatch, not match" },
+    { "verdict": "reject", "id": "~x", "why": "leading tilde expands to $HOME in a shell or under expanduser()" },
+    { "verdict": "reject", "id": "a$(id)", "why": "shell metacharacters" },
+    { "verdict": "reject", "id": "café", "why": "non-ASCII: the charset is ASCII by construction" },
+    { "verdict": "reject", "id": "аbc", "why": "Cyrillic а (U+0430) homoglyph — visually a legal id, byte-wise not" },
+    { "verdict": "reject", "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "why": "101 characters — one past the bound" }
+  ]
+}

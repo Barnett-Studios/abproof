@@ -13,6 +13,23 @@ an executor as the measured arm. Two front doors (CLI + library crate) wrap one 
 > constitution — abproof is offline and never feeds the live agent loop; its absence just means the
 > harness goes unmeasured.
 
+### Corpus input is untrusted, and malformed input is refused rather than repaired
+
+The corpus is authored, and abproof treats what it authors as untrusted at every filesystem sink:
+`worktree.rs` refuses an absolute or `..`-bearing `meta.files` entry, and `driver.rs` refuses a
+`node.id` that is not a slug (`[A-Za-z0-9][A-Za-z0-9._-]*`, at most 100 characters) before it
+reaches a temp path — `DriverError::InvalidNode`.
+
+That rule is shared with the consumer harness, and the sharing is mechanical rather than
+declared: `tests/id-guard/vectors.json` is a byte-identical copy of the family's canonical
+adversarial corpus, this guard is judged against it in CI, and the upstream twin's CI diffs the
+copy. A guard that is stricter or laxer than its sibling fails a test rather than a review.
+
+**Refused, never rewritten.** Sanitizing a bad id into a legal one (`a/b` → `a_b`) would be safe
+and dishonest: the run, its temp artifact, and every report derived from them would describe a node
+identity that is not in the corpus. That is the same fail-loud rule as above, applied to input — a
+malformed corpus entry is a curation defect to surface, not to paper over.
+
 ## Front door 1 — CLI
 
 ```
@@ -94,3 +111,6 @@ rather than failing on a point estimate it cannot statistically back up.
 
 Semver on the crate. The CLI (`run` + flags), the exit-code contract, and the manifest +
 baseline-JSON schema are the stable public surface.
+
+`DriverError` is `#[non_exhaustive]`: match it with a wildcard arm. Adding a variant is then a
+minor change rather than a breaking one — which it was not when `InvalidNode` was added.
