@@ -122,6 +122,22 @@ pub fn load_baseline(path: &Path) -> Result<Baseline, String> {
 /// (CONTRACT.md amendment), used when a manifest does not set `gate_alpha`.
 pub const DEFAULT_GATE_ALPHA: f64 = 0.05;
 
+/// Exit code for a battery that could not have reached `alpha` (issue #3). Distinct from
+/// `0` (measured, no regression), `1` (confirmed regression) and `3` (aborted): the
+/// measurement completed and is internally valid, it simply had no power to decide.
+pub const EXIT_UNDERPOWERED: i32 = 4;
+
+/// Three-state gate outcome. `Pass` means "we looked and found no regression";
+/// `Underpowered` means "this battery could not have found one" — collapsing the two
+/// into a boolean is what let underpowered nulls read as evidence of no effect (#3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum GateOutcome {
+    Pass,
+    Fail,
+    Underpowered,
+}
+
 /// Gate verdict for a single gated metric.
 #[derive(Debug, Clone, Serialize)]
 pub struct GateVerdict {
@@ -135,7 +151,16 @@ pub struct GateVerdict {
     /// was supplied. `None` when no paired-delta series exists for this
     /// metric (v1: always `Some` for `node_pass_rate`, the sole gated metric).
     pub p_two_sided: Option<f64>,
+    /// Discordant (non-zero) paired-delta count — the power denominator.
+    /// `None` when no paired series was supplied.
+    pub n_nonzero: Option<usize>,
+    /// Smallest two-sided p this battery's `n_nonzero` could have produced.
+    /// `None` when no paired series was supplied.
+    pub min_attainable_p: Option<f64>,
+    /// True only for a *confirmed* regression (worse **and** significant). Never true
+    /// when the outcome is `Underpowered` — see `gate`.
     pub regressed: bool,
+    pub outcome: GateOutcome,
 }
 
 /// Returns the observed value for the named gated metric from an ArmAggregate.
@@ -165,15 +190,35 @@ fn observed_for(metric: &str, treatment: &ArmAggregate) -> Option<f64> {
 /// signed-rank) on the gated metric's per-node deltas. `None` falls back
 /// to the bare point estimate — for any future gated metric that has no
 /// paired-delta series to test. A point estimate alone is never sufficient to fail
-/// the gate when significance data is available; an underpowered or noisy run that
-/// fails to clear `alpha` is honestly reported as "not a confirmed regression".
+/// the gate when significance data is available; a noisy run that fails to clear
+/// `alpha` is honestly reported as "not a confirmed regression".
+///
+/// **Minimum-power guard (issue #3).** `n_nonzero` is the realised discordant-pair
+/// count. When `stats::min_attainable_p(n_nonzero) > alpha`, no arrangement of the
+/// observed data could have cleared `alpha` — the battery was mathematically incapable
+/// of failing its own gate — and the outcome is `Underpowered`, never `Pass`. The guard
+/// is direction-blind on purpose: a battery that could not have detected a regression
+/// did not establish its absence just because the point estimate happened to improve.
+///
+/// `regressed` keeps its prior meaning (worse **and** significant) on every powered
+/// battery, so the confirmed-regression path is untouched. It additionally requires
+/// `!underpowered`. On self-consistent inputs that conjunct is redundant — a real
+/// `p >= min_attainable_p > alpha` already makes `p < alpha` unsatisfiable — but relying
+/// on that leaves the invariant resting on callers passing a `(p, n_nonzero)` pair drawn
+/// from the same test. Enforcing it here makes "a battery cannot be both underpowered and
+/// a confirmed regression" structural rather than assumed, so a future caller that
+/// computes the two from different series cannot resurrect a false FAIL. Pinned by
+/// `gate_underpowered_and_regressed_are_mutually_exclusive`.
 pub fn gate(
     manifest: &Manifest,
     baseline_arm: &ArmAggregate,
     treatment: &ArmAggregate,
     p_two_sided: Option<f64>,
+    n_nonzero: Option<usize>,
 ) -> Vec<GateVerdict> {
     let alpha = manifest.gate_alpha.unwrap_or(DEFAULT_GATE_ALPHA);
+    let min_attainable_p = n_nonzero.map(crate::stats::min_attainable_p);
+    let underpowered = min_attainable_p.is_some_and(|floor| floor > alpha);
     manifest
         .gated_metrics()
         .into_iter()
@@ -182,7 +227,14 @@ pub fn gate(
             let observed_value = observed_for(metric, treatment)?;
             let tolerance = manifest.tolerance.get(metric).copied().unwrap_or(0.0);
             let worse = observed_value < baseline_value - tolerance;
-            let regressed = worse && p_two_sided.is_none_or(|p| p < alpha);
+            let regressed = worse && !underpowered && p_two_sided.is_none_or(|p| p < alpha);
+            let outcome = if underpowered {
+                GateOutcome::Underpowered
+            } else if regressed {
+                GateOutcome::Fail
+            } else {
+                GateOutcome::Pass
+            };
             Some(GateVerdict {
                 metric: metric.to_string(),
                 baseline_value,
@@ -190,16 +242,29 @@ pub fn gate(
                 tolerance,
                 alpha,
                 p_two_sided,
+                n_nonzero,
+                min_attainable_p,
                 regressed,
+                outcome,
             })
         })
         .collect()
 }
 
-/// Returns 1 if any verdict regressed, else 0.
+/// `1` for a confirmed regression, [`EXIT_UNDERPOWERED`] when no verdict regressed but
+/// at least one battery could not have reached `alpha`, else `0`.
+///
+/// A confirmed regression outranks an underpowered sibling: a metric that *did* detect
+/// a regression is the more actionable signal, and the underpowered one is still named
+/// in the report.
 pub fn exit_code(verdicts: &[GateVerdict]) -> i32 {
-    if verdicts.iter().any(|v| v.regressed) {
+    if verdicts.iter().any(|v| v.outcome == GateOutcome::Fail) {
         1
+    } else if verdicts
+        .iter()
+        .any(|v| v.outcome == GateOutcome::Underpowered)
+    {
+        EXIT_UNDERPOWERED
     } else {
         0
     }
@@ -432,7 +497,7 @@ mod tests {
     #[test]
     fn gate_passes_when_no_regression() {
         // baseline 0.70, tol 0.0, treatment 0.80 → NOT regressed → exit 0.
-        let verdicts = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.80), None);
+        let verdicts = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.80), None, None);
         assert!(!verdicts[0].regressed);
         assert_eq!(exit_code(&verdicts), 0);
     }
@@ -441,7 +506,7 @@ mod tests {
     fn gate_fails_on_regression() {
         // baseline 0.70, tol 0.0, treatment 0.60, no significance series →
         // point-estimate fallback → regressed → exit 1.
-        let verdicts = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), None);
+        let verdicts = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), None, None);
         assert!(verdicts[0].regressed);
         assert_eq!(exit_code(&verdicts), 1);
     }
@@ -449,7 +514,7 @@ mod tests {
     #[test]
     fn gate_respects_tolerance_band() {
         // baseline 0.70, tol 0.05, treatment 0.66 → 0.66 >= 0.65 → NOT regressed.
-        let verdicts = gate(&manifest_070_tol005(), &agg(0.70), &agg(0.66), None);
+        let verdicts = gate(&manifest_070_tol005(), &agg(0.70), &agg(0.66), None, None);
         assert!(!verdicts[0].regressed);
     }
 
@@ -457,7 +522,7 @@ mod tests {
     fn gate_tolerance_below_band_is_regressed() {
         // baseline 0.70, tol 0.05, treatment 0.64 → 0.64 < 0.65, no
         // significance series → point-estimate fallback → regressed → exit 1.
-        let verdicts = gate(&manifest_070_tol005(), &agg(0.70), &agg(0.64), None);
+        let verdicts = gate(&manifest_070_tol005(), &agg(0.70), &agg(0.64), None, None);
         assert!(verdicts[0].regressed);
         assert_eq!(exit_code(&verdicts), 1);
     }
@@ -471,6 +536,7 @@ mod tests {
             &agg(0.70),
             &agg_full(0.80, 1.0, 0.9),
             None,
+            None,
         );
         assert!(verdicts.iter().all(|v| v.metric == "node_pass_rate"));
     }
@@ -481,7 +547,13 @@ mod tests {
     fn gate_confirms_regression_when_significant() {
         // baseline 0.70, tol 0.0, treatment 0.60 (worse) + p=0.01 < alpha(0.05)
         // → confirmed regression → exit 1.
-        let verdicts = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), Some(0.01));
+        let verdicts = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.60),
+            Some(0.01),
+            Some(20),
+        );
         assert!(verdicts[0].regressed);
         assert_eq!(verdicts[0].alpha, DEFAULT_GATE_ALPHA);
         assert_eq!(exit_code(&verdicts), 1);
@@ -494,7 +566,13 @@ mod tests {
         // gate must not fail — this is the key honesty case: an underpowered
         // or noisy run reports "not a confirmed regression", not a false
         // failure.
-        let verdicts = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), Some(0.20));
+        let verdicts = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.60),
+            Some(0.20),
+            Some(20),
+        );
         assert!(!verdicts[0].regressed);
         assert_eq!(exit_code(&verdicts), 0);
     }
@@ -503,7 +581,13 @@ mod tests {
     fn gate_improvement_never_regresses_regardless_of_significance() {
         // treatment 0.80 > baseline 0.70: `worse` is false, so even a highly
         // significant p-value must not flip this into a regression.
-        let verdicts = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.80), Some(0.001));
+        let verdicts = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.80),
+            Some(0.001),
+            Some(20),
+        );
         assert!(!verdicts[0].regressed);
     }
 
@@ -511,8 +595,8 @@ mod tests {
     fn gate_none_significance_falls_back_to_point_estimate() {
         // No paired-delta series available for this metric → the bare
         // point-estimate rule applies, unconditionally on the p-value.
-        let regressed = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), None);
-        let not_regressed = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.80), None);
+        let regressed = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), None, None);
+        let not_regressed = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.80), None, None);
         assert!(regressed[0].regressed);
         assert!(!not_regressed[0].regressed);
         assert!(regressed[0].p_two_sided.is_none());
@@ -523,11 +607,17 @@ mod tests {
         // p=0.07 sits between the default alpha(0.05) and a manifest-set
         // alpha(0.10): NOT significant at 0.05 (default), but significant
         // at the wider 0.10 the manifest opts into.
-        let default_verdicts = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), Some(0.07));
+        let default_verdicts = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.60),
+            Some(0.07),
+            Some(20),
+        );
         assert!(!default_verdicts[0].regressed);
 
         let widened = manifest_070_tol0_alpha(0.10);
-        let widened_verdicts = gate(&widened, &agg(0.70), &agg(0.60), Some(0.07));
+        let widened_verdicts = gate(&widened, &agg(0.70), &agg(0.60), Some(0.07), Some(20));
         assert!(widened_verdicts[0].regressed);
         assert_eq!(widened_verdicts[0].alpha, 0.10);
     }
@@ -648,7 +738,13 @@ mod tests {
         // treatment 0.60 is worse than the in-run baseline ARM 0.70 and significant →
         // regressed. `baseline_value` in the verdict is the in-run arm (0.70), the same
         // series the p-value was computed against — not a committed baseline.json scalar.
-        let v = gate(&manifest_070_tol0(), &agg(0.70), &agg(0.60), Some(0.01));
+        let v = gate(
+            &manifest_070_tol0(),
+            &agg(0.70),
+            &agg(0.60),
+            Some(0.01),
+            Some(20),
+        );
         assert!(v[0].regressed);
         assert_eq!(
             v[0].baseline_value, 0.70,
@@ -660,7 +756,13 @@ mod tests {
     fn gate_not_regressed_when_treatment_beats_in_run_baseline_arm() {
         // The committed baseline is irrelevant to the gate now: treatment 0.75 beats the
         // in-run baseline arm 0.60, so it is NOT worse — even a tiny p-value cannot flip it.
-        let v = gate(&manifest_070_tol0(), &agg(0.60), &agg(0.75), Some(0.0001));
+        let v = gate(
+            &manifest_070_tol0(),
+            &agg(0.60),
+            &agg(0.75),
+            Some(0.0001),
+            Some(20),
+        );
         assert!(!v[0].regressed);
         assert_eq!(v[0].baseline_value, 0.60);
     }

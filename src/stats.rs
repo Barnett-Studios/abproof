@@ -119,6 +119,36 @@ pub struct WilcoxonResult {
     pub n_nonzero: usize,
     pub p_two_sided: f64,
     pub method: WilcoxonMethod,
+    /// Smallest two-sided p this battery's `n_nonzero` could have produced — see
+    /// [`min_attainable_p`]. Carried alongside the realised p so a consumer can tell
+    /// "no regression" from "no power to detect one" without re-deriving the floor.
+    pub min_attainable_p: f64,
+}
+
+/// Smallest two-sided p-value attainable with `n_nonzero` non-zero paired deltas.
+///
+/// The exact test enumerates all `2ⁿ` sign assignments and counts those whose
+/// `|W+ − μ|` reaches the observed deviation. The largest attainable deviation is
+/// `Σr/2`, and exactly two assignments reach it — all-positive and all-negative — so
+/// the floor is `2 / 2ⁿ` regardless of the rank values. It therefore depends only on
+/// the count, which is what makes it computable *before* looking at the signs.
+///
+/// The operative consequence: `α = 0.05` is unreachable at `n ≤ 5` (floor `0.0625`)
+/// and reachable from `n = 6` (floor `0.03125`). A battery below that threshold cannot
+/// fail its own gate no matter what the data say.
+///
+/// Above [`EXACT_MAX_N`] the normal approximation runs instead and has no such floor,
+/// but `2/2²⁵ ≈ 6e-8` is already far below any usable α, so the closed form remains a
+/// sound (and there merely conservative) bound across the whole range.
+///
+/// `n_nonzero == 0` is the degenerate case: every pair tied, so there is no signal at
+/// all and the floor is `1.0`.
+pub fn min_attainable_p(n_nonzero: usize) -> f64 {
+    if n_nonzero == 0 {
+        return 1.0;
+    }
+    // `powi` saturates to 0.0 well before `i32::MAX`; clamping keeps the cast total.
+    (2.0 * 0.5_f64.powi(n_nonzero.min(1024) as i32)).min(1.0)
 }
 
 /// Largest non-zero count for which the exact 2ⁿ sign-flip enumeration is used. Above this
@@ -177,6 +207,7 @@ pub fn wilcoxon_signed_rank(deltas: &[f64]) -> WilcoxonResult {
             n_nonzero: 0,
             p_two_sided: 1.0,
             method: WilcoxonMethod::NormalApproxPratt,
+            min_attainable_p: min_attainable_p(0),
         };
     }
 
@@ -194,26 +225,26 @@ pub fn wilcoxon_signed_rank(deltas: &[f64]) -> WilcoxonResult {
     // swap the enumeration for the O(n·Σr) DP convolution rather than raising this bound.
     let use_exact = n_nonzero <= EXACT_MAX_N;
 
-    if use_exact {
-        let p = exact_wilcoxon_p(w_plus, &nonzero_ranks);
-        WilcoxonResult {
-            w_plus,
-            w_minus,
-            w,
-            n_nonzero,
-            p_two_sided: p,
-            method: WilcoxonMethod::ExactPratt,
-        }
+    let (p, method) = if use_exact {
+        (
+            exact_wilcoxon_p(w_plus, &nonzero_ranks),
+            WilcoxonMethod::ExactPratt,
+        )
     } else {
-        let p = approx_wilcoxon_p(w_plus, &nonzero_ranks);
-        WilcoxonResult {
-            w_plus,
-            w_minus,
-            w,
-            n_nonzero,
-            p_two_sided: p,
-            method: WilcoxonMethod::NormalApproxPratt,
-        }
+        (
+            approx_wilcoxon_p(w_plus, &nonzero_ranks),
+            WilcoxonMethod::NormalApproxPratt,
+        )
+    };
+
+    WilcoxonResult {
+        w_plus,
+        w_minus,
+        w,
+        n_nonzero,
+        p_two_sided: p,
+        method,
+        min_attainable_p: min_attainable_p(n_nonzero),
     }
 }
 

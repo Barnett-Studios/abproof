@@ -540,11 +540,14 @@ pub fn run_experiment(
     // CONTRACT.md amendment: the point-estimate regression on node_pass_rate is
     // confirmed only when the paired Wilcoxon p-value also clears `alpha` —
     // see `score::gate` for the honesty rationale.
+    // #3: `n_nonzero` rides along so the gate can refuse to call a battery that could not
+    // have reached alpha a PASS.
     let verdicts = score::gate(
         manifest,
         &baseline_agg,
         &treatment_agg,
         Some(wilcoxon.p_two_sided),
+        Some(wilcoxon.n_nonzero),
     );
 
     // Measurement-integrity guard: every manifest-declared gated metric MUST yield a
@@ -601,7 +604,7 @@ pub fn run_experiment(
         d_z: Some(dz),
         ci_lower: Some(ci.lower),
         ci_upper: Some(ci.upper),
-        verdict: gate_verdict.map(|v| !v.regressed),
+        verdict: gate_verdict.map(|v| v.outcome),
         wilcoxon_method: Some(wilcoxon_method_str),
         n_nonzero: Some(wilcoxon.n_nonzero),
     });
@@ -697,6 +700,8 @@ pub fn run_experiment(
         gate_exit,
         aborted: false,
         abort_reason: None,
+        n_discordant: Some(wilcoxon.n_nonzero),
+        min_attainable_p: Some(wilcoxon.min_attainable_p),
         total_cost_usd,
         baseline_cost_usd,
         treatment_cost_usd,
@@ -759,6 +764,11 @@ fn abort_record(
         gate_exit: 3,
         aborted: true,
         abort_reason: Some(reason.to_string()),
+        // An aborted run never reached the paired test, so it has no power figures to
+        // report. `None` (absent), not `Some(0)` — a fabricated zero here would read as
+        // "measured, and it had no power", which is a different claim.
+        n_discordant: None,
+        min_attainable_p: None,
         total_cost_usd: Some(cum_cost),
         baseline_cost_usd: Some(baseline_cost),
         treatment_cost_usd: Some(treatment_cost),
@@ -1507,14 +1517,15 @@ mod tests {
             row.p_two_sided
         );
         assert_eq!(rec.gate_exit, 1, "confirmed regression → exit 1");
-        assert_eq!(row.verdict, Some(false));
+        assert_eq!(row.verdict, Some(score::GateOutcome::Fail));
     }
 
     #[test]
-    fn e2e_single_node_worse_is_underpowered_exit_0() {
+    fn e2e_single_node_worse_is_underpowered_not_a_pass() {
         // The same treatment-worse signal over ONE node cannot reach significance
-        // (n=1 → p=1.0), so the gate honestly reports "not a confirmed regression"
-        // (exit 0) instead of the old pseudo-replicated false exit 1 (D2).
+        // (n=1 → p=1.0), so it is not the pseudo-replicated false exit 1 of pre-D2.
+        // Since #3 it is not a PASS either: n=1 has a floor of 1.0, so this battery
+        // could not have failed its own gate. It reports UNDERPOWERED / exit 4.
         let m = manifest_n_nodes_both_local(&["only"]);
         let nodes = vec![make_node("only")];
         let rec = run_experiment(
@@ -1538,10 +1549,11 @@ mod tests {
             row.p_two_sided
         );
         assert_eq!(
-            rec.gate_exit, 0,
-            "underpowered → not a confirmed regression"
+            rec.gate_exit,
+            score::EXIT_UNDERPOWERED,
+            "underpowered → neither a confirmed regression (1) nor a pass (0)"
         );
-        assert_eq!(row.verdict, Some(true));
+        assert_eq!(row.verdict, Some(score::GateOutcome::Underpowered));
     }
 
     // ── #3: minimum-power guard — a battery that cannot reach alpha is not a PASS ──
@@ -1625,7 +1637,10 @@ mod tests {
             .find(|r| r.metric == "node_pass_rate")
             .expect("gated row");
         assert_eq!(row.verdict, Some(score::GateOutcome::Fail));
-        assert_eq!(rec.gate_exit, 1, "powered + significant → confirmed regression");
+        assert_eq!(
+            rec.gate_exit, 1,
+            "powered + significant → confirmed regression"
+        );
     }
 
     #[test]

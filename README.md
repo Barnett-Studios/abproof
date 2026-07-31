@@ -13,9 +13,9 @@ the **same executor** twice — baseline vs. treatment — over a corpus of RED-
 tasks, with seed-blocked pairing, task-typed scoring, and a gate that only fails a run when the
 regression is both beyond tolerance and statistically significant (paired Wilcoxon, α = 0.05 by
 default) — not a bare point estimate. A worse-but-noisy result honestly exits PASS rather than
-failing on chance; an underpowered run is a validity problem for the *experiment* (the node is the
-unit of replication, so power comes from a **larger battery** — `reps` only sharpen each node's
-rate), not something the gate silently papers over.
+failing on chance; a run that could not have reached α exits `UNDERPOWERED` rather than borrowing
+that PASS. The node is the unit of replication, so power comes from a **larger battery** — `reps`
+only sharpen each node's rate.
 
 Unlike a prompt-eval framework, abproof A/Bs the **whole assembly running a real loop**, not a
 single model call — the executor is the arm.
@@ -78,8 +78,24 @@ judge-calls, minutes, and claude-cli calls before you spend anything.
 | `0` | projection/dry-run printed, or the gate PASSED |
 | `1` | setup error (bad manifest, missing baseline, unreadable corpus) |
 | `3` | experiment **aborted** — an invalid measurement (local runtime unavailable, cost cap hit mid-battery); never presented as a result |
+| `4` | **UNDERPOWERED** — the battery ran and is internally valid, but `alpha` was unreachable, so it could not have failed its own gate. Not a PASS |
 | gate | on `--confirm`, the process exits with the statistical gate's own code (non-zero = FAIL) |
 | `64` | usage error |
+
+### Underpowered is not a pass
+
+With `n` discordant (non-zero) paired deltas, the exact two-sided sign-flip test has a hard
+floor of `2/2ⁿ`: only the all-positive and all-negative assignments reach the extreme, out of
+`2ⁿ`. So `α = 0.05` is unreachable at `n ≤ 5` (floor `0.0625`) and reachable from `n = 6`
+(floor `0.03125`). A battery below that threshold **cannot** fail its own gate whatever the
+data say — reporting PASS there means "we couldn't have found a regression", not "we looked
+and found none". abproof reports such a run as `UNDERPOWERED` with its own exit code.
+
+The guard is deliberately **direction-blind**: a battery with no power to detect a regression
+did not establish its absence just because the point estimate happened to improve. Every
+result carries `n_discordant` and `min_attainable_p` so the power denominator is never hidden
+— that is how underpowered nulls get misread as evidence of no effect. Power comes from more
+*discordant* nodes, not more reps on nodes whose arms already agree.
 
 abproof is deliberately **fail-loud**, not fail-open: an offline oracle that silently returned a
 green verdict on a broken run would be worse than useless. (It still stays out of the way —
