@@ -188,6 +188,37 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
         ));
     }
 
+    // Gate scope (#4) — exactly which dimensions the verdict covers, and which it does
+    // not. `node_pass_rate` is the sole gated metric, so a treatment that holds solve-rate
+    // while doubling cost or halving wellformedness still exits 0. That is a defensible
+    // pre-registration choice (one metric, no multiple-comparisons trap) but only when it
+    // is stated: otherwise a PASS silently reads as "nothing regressed".
+    //
+    // Derived from the rows themselves rather than a hardcoded list, so it stays true if
+    // the gated panel ever changes.
+    {
+        let named = |tag: &str| -> Vec<&str> {
+            rec.rows
+                .iter()
+                .filter(|r| r.tag == tag)
+                .map(|r| r.metric.as_str())
+                .collect()
+        };
+        let gated = named("gated");
+        if !gated.is_empty() {
+            let mut ungated = named("tracked");
+            // Cost and duration are collected and reported but never enter a verdict, and
+            // they are not rows — name them explicitly or they read as simply absent.
+            ungated.extend(["cost_usd", "duration"]);
+            out.push('\n');
+            out.push_str(&format!("Gate covers: {}.\n", gated.join(", ")));
+            out.push_str(&format!(
+                "UNGATED (measured, never gated — a regression in these does NOT fail the run): {}\n",
+                ungated.join(", ")
+            ));
+        }
+    }
+
     // Absent metrics — declared, unmeasured, and named as such. A reader who sees no
     // judge_quality row must not be left to guess whether it was out of scope or missing.
     if !rec.absent_metrics.is_empty() {

@@ -1574,6 +1574,51 @@ mod tests {
         assert_eq!(row.verdict, Some(score::GateOutcome::Underpowered));
     }
 
+    // ── #4: a PASS must state what it does NOT cover ──────────────────────────
+
+    #[test]
+    fn report_names_the_gated_and_the_ungated_dimensions() {
+        // node_pass_rate is the sole gated metric, so a treatment that holds solve-rate
+        // while regressing cost or wellformedness still exits 0. Defensible as a
+        // pre-registration choice — but only if the report says so, or the PASS reads as
+        // "nothing regressed".
+        let rec = record_with_no_judge();
+        let table = crate::report::render_r_table(&rec);
+        assert!(
+            table.contains("Gate covers: node_pass_rate"),
+            "the report must name what the verdict covers:\n{table}"
+        );
+        assert!(
+            table.contains("UNGATED"),
+            "the report must name what the verdict does NOT cover:\n{table}"
+        );
+        assert!(
+            table.contains("does NOT fail the run"),
+            "the consequence must be spelled out, not left to inference:\n{table}"
+        );
+        // Every tracked row is measured-but-ungated and must appear in that list.
+        for row in rec.rows.iter().filter(|r| r.tag == "tracked") {
+            let listed = table
+                .lines()
+                .find(|l| l.starts_with("UNGATED"))
+                .is_some_and(|l| l.contains(row.metric.as_str()));
+            assert!(
+                listed,
+                "tracked metric '{}' missing from UNGATED",
+                row.metric
+            );
+        }
+        // Cost is measured and reported but is not a row; naming it explicitly is the
+        // difference between "ungated" and "you might reasonably assume it is covered".
+        assert!(
+            table
+                .lines()
+                .find(|l| l.starts_with("UNGATED"))
+                .is_some_and(|l| l.contains("cost_usd")),
+            "cost is measured but never gated and must be named:\n{table}"
+        );
+    }
+
     // ── #8: an unmeasured metric is ABSENT, never 0.0 ─────────────────────────
 
     /// `manifest_n_nodes_both_local` plus the two tracked quality metrics declared.
