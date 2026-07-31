@@ -54,7 +54,7 @@ pub mod experiment; // load_manifest, Manifest::{validate, is_cross_loop, tracke
 pub mod corpus;     // red_baseline_root, load_battery, load_node
 pub mod run;        // project, run_experiment, RunOptions, DryRun, ExperimentRecord
 pub mod driver;     // NodeDriver trait, LocalNodeDriver, ClaudeCliDriver
-pub mod judge;      // Judge trait, StubJudge, JudgeScore
+pub mod judge;      // Judge trait, AbsentJudge (the shipped default), StubJudge, JudgeScore
 pub mod score;      // load_baseline, task-typed scoring
 pub mod stats;      // hand-rolled non-verbatim statistics (Pratt zeros, average-rank ties)
 pub mod report;     // write_result_json, render_r_table
@@ -70,7 +70,8 @@ resolver) and depends on no engine crate. It drives an executor (the reference i
 
 Two pipeline configurations (baseline vs. treatment), **seed-blocked** so the same seeds run both
 arms, `reps` per seed. Deterministic acceptance (the RED test) is **gated**; judge + engine quality
-are **tracked**. Statistics are hand-rolled and non-verbatim (Pratt treatment of zeros, average-rank
+are **tracked** — and, today, **not measured**: no judge is wired (`AbsentJudge` is the shipped
+default) and `engine_broken_rate` has no source, so both are reported **ABSENT**, never `0.0`. Statistics are hand-rolled and non-verbatim (Pratt treatment of zeros, average-rank
 ties, gate-vs-track separation). A cross-loop manifest (local vs claude-cli) compares runtimes over
 the shared loop. Remote/infra failure maps to *abort*, never a measured 0.0.
 
@@ -131,3 +132,25 @@ baseline-JSON schema are the stable public surface.
 
 `DriverError` is `#[non_exhaustive]`: match it with a wildcard arm. Adding a variant is then a
 minor change rather than a breaking one — which it was not when `InvalidNode` was added.
+
+## Unmeasured metrics are ABSENT, never `0.0`
+
+A metric the manifest declares but nothing measures produces **no row**, and is named in
+`absent_metrics` on the record and in an `ABSENT (declared but not measured — no value, NOT
+0.0)` line in the rendered table. Silence alone is not enough: a reader who finds no
+`judge_quality` row must be able to tell "declared and unmeasured" from "never in scope".
+
+This matters because the failure it replaces was directional. `judge_quality` was reported as
+a fabricated `0.0` — a *number*, which a consumer reads as "quality was measured, and it was
+the worst possible". Absence is the honest statement; a zero is a false claim about output
+quality.
+
+`absent_metrics` is derived from the rows actually emitted, not from a hand-kept list, so it
+cannot drift out of step with the emitters.
+
+**On wiring a real judge.** Until [attestr#9] establishes judge ↔ human-label agreement, any
+LLM judge is an *uncalibrated instrument*: report it as uncalibrated rather than promoting it
+to ground truth. An uncalibrated judge's score is a measurement of the judge as much as of the
+work.
+
+[attestr#9]: https://github.com/Barnett-Studios/attestr/issues/9

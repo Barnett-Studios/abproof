@@ -640,12 +640,26 @@ pub fn run_experiment(
                 // real data; missing judge data means the seam returned no scores).
             }
             // engine_broken_rate: no v1 source wired; will return in v2 with real
-            // engine telemetry. Removed to avoid shipping fabricated zeros.
+            // engine telemetry. Emitting nothing avoids shipping fabricated zeros —
+            // the `absent_metrics` sweep below then names it, so "unwired" is reported
+            // rather than merely silent.
             _ => {
                 // Unknown tracked metric — skip rather than panic or fabricate.
             }
         }
     }
+
+    // #8: a metric the manifest declared but nothing measured is ABSENT, and is named as
+    // such. Derived from the rows actually emitted rather than from a hand-kept list, so
+    // it cannot drift out of step with what the emitters above do — any tracked metric
+    // that fails to produce a row lands here by construction, whether that is an
+    // unconfigured judge or a source that was never wired.
+    let absent_metrics: Vec<String> = manifest
+        .tracked_metrics()
+        .into_iter()
+        .filter(|m| !rows.iter().any(|r| r.metric == *m))
+        .map(str::to_string)
+        .collect();
 
     // ── wellformed% / pass@1 / pass@2 ───────────────────────────────────────
     // Always emitted when there is non-skipped run data; not manifest-driven.
@@ -702,6 +716,7 @@ pub fn run_experiment(
         abort_reason: None,
         n_discordant: Some(wilcoxon.n_nonzero),
         min_attainable_p: Some(wilcoxon.min_attainable_p),
+        absent_metrics,
         total_cost_usd,
         baseline_cost_usd,
         treatment_cost_usd,
@@ -769,6 +784,9 @@ fn abort_record(
         // "measured, and it had no power", which is a different claim.
         n_discordant: None,
         min_attainable_p: None,
+        // An abort produced no rows at all, so "which declared metric is missing" is not
+        // the interesting fact — `abort_reason` is. Listing every metric here would bury it.
+        absent_metrics: Vec::new(),
         total_cost_usd: Some(cum_cost),
         baseline_cost_usd: Some(baseline_cost),
         treatment_cost_usd: Some(treatment_cost),
