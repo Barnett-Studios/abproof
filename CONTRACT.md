@@ -133,6 +133,29 @@ baseline-JSON schema are the stable public surface.
 `DriverError` is `#[non_exhaustive]`: match it with a wildcard arm. Adding a variant is then a
 minor change rather than a breaking one — which it was not when `InvalidNode` was added.
 
+## What a PASS does and does not cover
+
+`node_pass_rate` is the **sole gated metric**. One pre-registered metric is a deliberate
+choice — it avoids the multiple-comparisons trap that a panel of gated dimensions would
+introduce — but it has a consequence worth stating plainly: **a treatment that holds
+solve-rate while regressing anything else still exits 0.** Double the token cost, halved
+`wellformed_pct`, a large latency increase, a quality drop: all PASS.
+
+So every report names both sides:
+
+```
+Gate covers: node_pass_rate.
+UNGATED (measured, never gated — a regression in these does NOT fail the run):
+  wellformed_pct, pass_at_1, pass_at_2, judge_quality, cost_usd, duration
+```
+
+The list is derived from the emitted rows, so it stays true if the gated panel changes.
+`cost_usd` and `duration` are named explicitly because they are measured and reported but
+are not rows — without naming them a reader could reasonably assume they were covered.
+
+A PASS from abproof means "solve-rate did not regress", not "nothing regressed". Read the
+tracked deltas before concluding a change is safe.
+
 ## Unmeasured metrics are ABSENT, never `0.0`
 
 A metric the manifest declares but nothing measures produces **no row**, and is named in
