@@ -77,6 +77,28 @@ pub struct ResultRecord {
     pub absent_metrics: Vec<String>,
 }
 
+/// Every dimension this harness measures, in report order — the single declaration the
+/// gate-scope footer is derived from.
+///
+/// It exists because the footer's two lists must be a partition, and a hand-maintained
+/// "and also these" tail cannot be one. Some of these surface as rows and some do not
+/// (`cost_usd` and `duration` are reported in the footer), which is why the list cannot be
+/// recovered from the emitted rows alone.
+///
+/// Adding a dimension here is what puts it in the report's scope statement. A dimension
+/// that emits a row without being listed here is still named — see `render_r_table` — so a
+/// missed entry degrades to a sorting nit rather than a false claim of completeness.
+pub const MEASURED_DIMENSIONS: &[&str] = &[
+    "node_pass_rate",
+    "judge_quality",
+    "engine_broken_rate",
+    "wellformed_pct",
+    "pass_at_1",
+    "pass_at_2",
+    "cost_usd",
+    "duration",
+];
+
 /// Render a Markdown R-table summarising the experiment result.
 ///
 /// One row per metric. Header notes the Wilcoxon method (Pratt zeros / average-rank ties)
@@ -194,22 +216,33 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
     // pre-registration choice (one metric, no multiple-comparisons trap) but only when it
     // is stated: otherwise a PASS silently reads as "nothing regressed".
     //
-    // Derived from the rows themselves rather than a hardcoded list, so it stays true if
-    // the gated panel ever changes.
+    // The two lists are a PARTITION of the dimensions this run knows about, computed as a
+    // set difference from `MEASURED_DIMENSIONS` — not a derived list with a hand-written
+    // tail appended. The earlier version appended `["cost_usd", "duration"]`
+    // unconditionally, so gating either would have produced a report claiming the gate
+    // both covered and did not cover it. A scope statement that can contradict itself is
+    // the wrong kind of bug in the paragraph whose only job is stating scope.
+    //
+    // The union with the emitted row metrics is deliberate: a dimension that reaches a row
+    // without being declared above is still named. A missed registry entry then costs
+    // report ordering, never a silent omission from a list the reader is entitled to read
+    // as complete.
     {
-        let named = |tag: &str| -> Vec<&str> {
-            rec.rows
-                .iter()
-                .filter(|r| r.tag == tag)
-                .map(|r| r.metric.as_str())
-                .collect()
-        };
-        let gated = named("gated");
+        let gated: Vec<&str> = rec
+            .rows
+            .iter()
+            .filter(|r| r.tag == "gated")
+            .map(|r| r.metric.as_str())
+            .collect();
         if !gated.is_empty() {
-            let mut ungated = named("tracked");
-            // Cost and duration are collected and reported but never enter a verdict, and
-            // they are not rows — name them explicitly or they read as simply absent.
-            ungated.extend(["cost_usd", "duration"]);
+            let mut ungated: Vec<&str> = MEASURED_DIMENSIONS
+                .iter()
+                .copied()
+                .chain(rec.rows.iter().map(|r| r.metric.as_str()))
+                .filter(|d| !gated.contains(d))
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            ungated.retain(|d| seen.insert(*d));
             out.push('\n');
             out.push_str(&format!("Gate covers: {}.\n", gated.join(", ")));
             out.push_str(&format!(
@@ -562,6 +595,87 @@ mod tests {
             !md.contains("VALIDITY WARNINGS"),
             "empty validity_warnings must not render warning block; got: {md}"
         );
+    }
+
+    // ── #4 follow-up: the scope statement must not be able to go stale ───────
+
+    /// A metric that is gated must never also be listed as ungated.
+    ///
+    /// The first cut of the gate-scope footer derived the ungated list from the tracked
+    /// rows and then appended `["cost_usd", "duration"]` unconditionally. If either is ever
+    /// gated, the report states that the gate both covers and does not cover it — in the
+    /// one paragraph whose entire job is stating scope accurately.
+    #[test]
+    fn a_gated_dimension_is_never_also_listed_as_ungated() {
+        let mut rec = sample_result_record();
+        // Promote cost_usd to the gated dimension — exactly the change the hardcoded
+        // list cannot see.
+        for r in rec.rows.iter_mut() {
+            r.tag = "tracked".to_string();
+        }
+        rec.rows.push(MetricRow {
+            metric: "cost_usd".to_string(),
+            tag: "gated".to_string(),
+            baseline: 0.10,
+            treatment: 0.08,
+            delta: -0.02,
+            w: None,
+            p_two_sided: None,
+            d_z: None,
+            ci_lower: None,
+            ci_upper: None,
+            verdict: Some(crate::score::GateOutcome::Pass),
+            wilcoxon_method: None,
+            n_nonzero: None,
+        });
+
+        let table = render_r_table(&rec);
+        let covers = table
+            .lines()
+            .find(|l| l.starts_with("Gate covers:"))
+            .expect("gate-scope footer must render");
+        let ungated = table
+            .lines()
+            .find(|l| l.starts_with("UNGATED"))
+            .expect("ungated line must render");
+
+        assert!(covers.contains("cost_usd"), "gated line: {covers}");
+        assert!(
+            !ungated.contains("cost_usd"),
+            "cost_usd is gated here, yet the report also calls it ungated:\n  {covers}\n  {ungated}"
+        );
+    }
+
+    /// Every declared dimension reaches the report — gated or ungated, never silently
+    /// omitted. Deriving the list purely from emitted rows would satisfy the test above
+    /// and still lose any dimension that produces no row, which is how `cost_usd` came to
+    /// be appended by hand in the first place.
+    ///
+    /// Scope, stated so this is not mistaken for more than it is: this guards the *wiring*
+    /// between `MEASURED_DIMENSIONS` and the renderer, not the soundness of the partition.
+    /// Given an implementation that iterates the registry, most of it holds by
+    /// construction; what it would actually catch is a future renderer that stops
+    /// consuming the registry — reintroducing a hand-written tail, or adding a ninth
+    /// dimension that nothing reads. The partition property itself is tested above.
+    #[test]
+    fn every_declared_dimension_reaches_the_report() {
+        let rec = sample_result_record();
+        let table = render_r_table(&rec);
+        let covers = table
+            .lines()
+            .find(|l| l.starts_with("Gate covers:"))
+            .expect("gate-scope footer must render");
+        let ungated = table
+            .lines()
+            .find(|l| l.starts_with("UNGATED"))
+            .expect("ungated line must render");
+
+        for dim in MEASURED_DIMENSIONS {
+            assert!(
+                covers.contains(dim) || ungated.contains(dim),
+                "measured dimension '{dim}' appears in neither line:\n  {covers}\n  {ungated}"
+            );
+        }
     }
 
     // ── wellformed_pct / pass@1 / pass@2 rendering ───────────────────────────
