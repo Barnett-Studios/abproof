@@ -1574,6 +1574,65 @@ mod tests {
         assert_eq!(row.verdict, Some(score::GateOutcome::Underpowered));
     }
 
+    // ── #4: a PASS must state what it does NOT cover ──────────────────────────
+
+    #[test]
+    fn report_names_the_gated_and_the_ungated_dimensions() {
+        // node_pass_rate is the sole gated metric, so a treatment that holds solve-rate
+        // while regressing cost or wellformedness still exits 0. Defensible as a
+        // pre-registration choice — but only if the report says so, or the PASS reads as
+        // "nothing regressed".
+        let rec = record_with_no_judge();
+        let table = crate::report::render_r_table(&rec);
+        assert!(
+            table.contains("Gate covers: node_pass_rate"),
+            "the report must name what the verdict covers:\n{table}"
+        );
+        assert!(
+            table.contains("UNGATED"),
+            "the report must name what the verdict does NOT cover:\n{table}"
+        );
+        assert!(
+            table.contains("does NOT fail the run"),
+            "the consequence must be spelled out, not left to inference:\n{table}"
+        );
+        // Every tracked row is measured-but-ungated and must appear in that list.
+        for row in rec.rows.iter().filter(|r| r.tag == "tracked") {
+            let listed = table
+                .lines()
+                .find(|l| l.starts_with("UNGATED"))
+                .is_some_and(|l| l.contains(row.metric.as_str()));
+            assert!(
+                listed,
+                "tracked metric '{}' missing from UNGATED",
+                row.metric
+            );
+        }
+        // Cost has no row, so only the UNGATED list can name it — but this fixture runs
+        // both arms locally, so no paid call happens and cost is NOT measured. It must
+        // therefore be absent here.
+        //
+        // This assertion previously demanded the opposite, and that is what motivated
+        // hardcoding `cost_usd` into the ungated list: a test asserting the report name a
+        // dimension the run never measured. The cost footer is omitted on local-only runs
+        // by design (a misleading `$0.0000` is worse than silence), so the report was being
+        // asked to say the gate does not cover a number it never produced.
+        //
+        // `report::tests::cost_still_reaches_the_report_when_it_was_measured` covers the
+        // case this was reaching for, on a fixture where cost actually is measured.
+        assert_eq!(
+            rec.total_claude_calls, 0,
+            "fixture precondition: both arms local, so no cost is measured"
+        );
+        assert!(
+            !table
+                .lines()
+                .find(|l| l.starts_with("UNGATED"))
+                .is_some_and(|l| l.contains("cost_usd")),
+            "no paid call ran, so cost was not measured and must not be listed:\n{table}"
+        );
+    }
+
     // ── #8: an unmeasured metric is ABSENT, never 0.0 ─────────────────────────
 
     /// `manifest_n_nodes_both_local` plus the two tracked quality metrics declared.

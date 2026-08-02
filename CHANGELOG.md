@@ -38,6 +38,35 @@ reconstructed from memory.
   corpus, byte-identical to the consumer's canonical copy and judged in CI here, so the two
   statistics twins cannot drift silently. Mirrors `tests/id-guard/vectors.json`.
 
+- **A metric with no wired source reports `ABSENT` rather than a fabricated `0.0`.**
+  `judge::AbsentJudge` is the shipped default and fails every call, so nothing enters the
+  aggregate; `absent_metrics` names each declared-but-unmeasured dimension, derived from the
+  rows actually emitted rather than a hand-kept list. A stub returning `0.0` is not merely
+  wrong — it is a *number*, and consumers do arithmetic on numbers.
+
+- **The report states its own gate scope.** A `Gate covers:` line names the gated metric and
+  an `UNGATED (measured, never gated)` line names every dimension a regression in which does
+  *not* fail the run. A PASS on one gated metric previously read as "nothing regressed". The
+  two lists are a partition over what the run actually produced.
+
+- **`UNGATED REGRESSION` alarm.** Fires only when an ungated dimension moved the wrong way by
+  >= 5%, so it stays an alarm rather than a banner. It is a **materiality** threshold and is
+  labelled as one — no ungated dimension has a paired-delta series in the record, so there is
+  no significance test to run and none is claimed.
+
+  A **zero baseline** is reported as unbounded (`from zero (unbounded)`) rather than skipped.
+  Relative change is undefined at zero, but direction is not. This is load-bearing for cost: a
+  free-local-baseline vs paid-treatment run has `baseline_cost_usd = 0` by construction, so the
+  regression had nothing to divide by. Both metrics v1 emits as rows are lower-is-worse, where
+  a zero baseline can only be an improvement.
+
+### Fixed
+
+- `cost_usd` is named as measured only when the run produced a cost figure — both that a paid
+  call ran *and* that it could be priced. A call reporting `cost_usd=unknown` blanks the cost
+  fields run-wide, so the previous predicate let one report call cost *measured* on the scope
+  line and *unreported* in the footer two lines above.
+
 ### Why this needs a release, not just a merge
 
 `dotclaude measure run` invokes abproof as a container and **fails open to its own in-tree

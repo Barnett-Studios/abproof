@@ -142,6 +142,113 @@ baseline-JSON schema are the stable public surface.
 `DriverError` is `#[non_exhaustive]`: match it with a wildcard arm. Adding a variant is then a
 minor change rather than a breaking one — which it was not when `InvalidNode` was added.
 
+## What a PASS does and does not cover
+
+`node_pass_rate` is the **sole gated metric**, and the consequence is worth stating
+plainly: **a treatment that holds solve-rate while regressing anything else still exits
+0.** Double the token cost, halved `wellformed_pct`, a quality drop — all PASS.
+
+**Why not gate a panel.** Not because of the multiple-comparisons trap: a Holm correction
+over a small pre-declared panel handles that cheaply, and saying otherwise would be
+restating the problem the correction exists to solve. The reason is that gating a metric
+requires a **pre-registered tolerance** — how much cost regression is a failure? measured
+against which reference, the in-run baseline arm or the committed baseline? — and those
+are measurement-design decisions that need data to set and a decision to record. Inventing
+them inside a reporting change would put numbers into a gate that nobody chose. The panel
+is a live option; it is a *pre-registration* task, not a formatting one.
+
+Until then a PASS must not read as "nothing regressed", so every report names both sides —
+the scope, always:
+
+```
+Gate covers: node_pass_rate.
+UNGATED (measured, never gated — a regression in these does NOT fail the run):
+  judge_quality, wellformed_pct, pass_at_1, pass_at_2, cost_usd
+```
+
+**and the alarm, only when something actually moved the wrong way:**
+
+```
+UNGATED REGRESSION — moved the wrong way and did not fail the run
+  (>= 5% materiality, NOT a significance test): cost_usd +112.0%, wellformed_pct -50.0%
+```
+
+The distinction is the whole point. The scope line states policy and prints identically
+whether cost doubled or held, so on its own a 2x cost regression produced byte-identical
+output to a flat run and the reader had to find it unaided in the deltas — which is what
+"silently PASS" means. The alarm fires only on movement, so it stays an alarm rather than
+becoming a second banner that trains readers to skip it.
+
+Two honesty constraints on that line. It is a **materiality** threshold, never a
+significance claim: no ungated dimension has a paired-delta series in the record, so there
+is no test to run, and the threshold is printed so a reader knows what was filtered. And
+direction is per-metric — higher is worse for `cost_usd` and `engine_broken_rate`, lower
+for the rates and scores — with `every_tracked_metric_has_a_known_direction` failing the
+build if a new metric arrives without one, since an unknown direction means *never
+alarmed*, which is the original defect one level down.
+
+A **zero baseline** is reported, not exempted:
+
+```
+UNGATED REGRESSION — moved the wrong way and did not fail the run
+  (>= 5% materiality, NOT a significance test): engine_broken_rate from zero (unbounded), …
+```
+
+Materiality is a *relative* threshold and zero has no relative change to divide by, so the
+first cut of this alarm returned "no regression" for a zero baseline.
+
+**In v1 the live case is cost.** A free-local-baseline vs paid-treatment run has
+`baseline_cost_usd = 0` by construction — the local rung reports `cost_usd=0.0`, not
+`unknown` — so a $0 -> $1.06 regression had nothing to divide by. The two row metrics v1
+emits, `node_pass_rate` and `judge_quality`, are both lower-is-worse, so a zero baseline on
+either can only be an improvement and is correctly silent either way.
+
+**`engine_broken_rate` is the forward case, not a current one.** Its healthy baseline is
+exactly zero, which makes it the load-bearing case for this guard — but it is unwired in v1
+and reports ABSENT, so 0% -> 40% broken cannot occur as a row today. The guard is correct
+before its motivating metric exists rather than after.
+
+Direction still decides — a metric climbing off zero the *right* way stays silent — and an
+unbounded move sorts ahead of every finite one on the line.
+
+`gated` and `ungated` are a **partition** over what *this run actually produced*. `gated`
+is read from the emitted rows; `ungated` is every other emitted row, plus `cost_usd` when a
+paid call ran **and the run could price it**, minus anything gated. Gating a dimension
+removes it from the ungated list in the same step, so no dimension can appear in both.
+
+Both cost conditions are load-bearing, and they fail differently. No paid call at all →
+the footer is omitted entirely, so naming `cost_usd` would point at a number the report
+never produced. Paid calls that could not be priced → any call reporting `cost_usd=unknown`
+blanks all three cost fields run-wide while the call count stays positive, degrading the
+footer to `Cost: unreported`; naming `cost_usd` as *measured* there contradicts that footer
+two lines up. This is the same invariant `absent_metrics` enforces for row metrics — ABSENT
+must not also be reported as measured — which cost slipped through by having no row to be
+absent from.
+
+The line says **measured**, never gated. Naming a dimension there asserts this run measured
+it, and three ways of getting that wrong were each shipped before being caught:
+
+- **A hand-written tail.** `["cost_usd", "duration"]` appended to a row-derived list. Gating
+  either would have produced a report claiming the gate both covered and did not cover it.
+- **A static registry of every known dimension.** This listed declared-but-unmeasured
+  metrics as measured — two lines above the ABSENT line calling them unmeasured.
+- **Naming a conditionally-measured dimension unconditionally.** The cost footer is omitted
+  on local-only runs by design, since a misleading `$0.0000` is worse than silence. Listing
+  `cost_usd` anyway told the reader the gate does not cover a number the report never
+  produced.
+
+Hence: everything comes from the run's own output, and the single exception — cost, which
+has no row — is conditioned on the same test the cost footer uses. `duration` is **not**
+listed: the driver times each run, but that never reaches the result record or any output,
+and naming a dimension the report does not surface points a reader at nothing. It belongs
+on the line the day it is reported.
+
+A declared dimension therefore lands in exactly one of three buckets — **gated**,
+**ungated**, or **ABSENT** — and they do not overlap.
+
+A PASS from abproof means "solve-rate did not regress", not "nothing regressed". Read the
+tracked deltas before concluding a change is safe.
+
 ## Unmeasured metrics are ABSENT, never `0.0`
 
 A metric the manifest declares but nothing measures produces **no row**, and is named in
