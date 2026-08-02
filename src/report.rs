@@ -18,8 +18,9 @@ pub struct MetricRow {
     pub d_z: Option<f64>,
     pub ci_lower: Option<f64>,
     pub ci_upper: Option<f64>,
-    /// `Some(true)` = passed gate, `Some(false)` = regressed, `None` = tracked (no verdict).
-    pub verdict: Option<bool>,
+    /// Gate outcome for this metric; `None` = tracked (no verdict).
+    /// Three-state since #3: `UNDERPOWERED` is not a `PASS`.
+    pub verdict: Option<crate::score::GateOutcome>,
     /// Wilcoxon method actually used: "ExactPratt" | "NormalApproxPratt".
     /// `None` for tracked rows (no Wilcoxon computed).
     pub wilcoxon_method: Option<String>,
@@ -37,7 +38,8 @@ pub struct ResultRecord {
     pub reps: u32,
     pub seeds_honoured: bool,
     pub rows: Vec<MetricRow>,
-    /// 0 = no regression, 1 = regression, 3 = aborted.
+    /// 0 = no regression, 1 = regression, 3 = aborted,
+    /// 4 = [`crate::score::EXIT_UNDERPOWERED`] (alpha was unreachable).
     pub gate_exit: i32,
     /// True when the experiment was aborted before producing a valid measurement.
     pub aborted: bool,
@@ -59,6 +61,15 @@ pub struct ResultRecord {
     /// `inconclusive_count / total_pairs_attempted`; `0.0` when no pairs were
     /// attempted. Compared against `INCONCLUSIVE_MAX_FRACTION` (A6).
     pub inconclusive_fraction: f64,
+    /// Discordant (non-zero) paired-delta count on the gated metric — the power
+    /// denominator. Reported on every result, not buried in a row: hiding it is how an
+    /// underpowered null gets read as evidence of no effect (#3). `None` when the run
+    /// aborted before a paired test ran.
+    pub n_discordant: Option<usize>,
+    /// Smallest two-sided p `n_discordant` could have produced. When this exceeds the
+    /// gate's `alpha`, the battery could not have failed its own gate at any effect
+    /// size. `None` when the run aborted before a paired test ran.
+    pub min_attainable_p: Option<f64>,
 }
 
 /// Render a Markdown R-table summarising the experiment result.
@@ -86,6 +97,17 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
         .unwrap_or_else(|| "Wilcoxon method: N/A (no gated metric data)\n\n".to_string());
     out.push_str(&method_line);
 
+    // Power line — the discordant count is the denominator every reader needs to tell
+    // "no regression" from "no power". Rendered before the table so it cannot be missed.
+    if let Some(n) = rec.n_discordant {
+        match rec.min_attainable_p {
+            Some(floor) => out.push_str(&format!(
+                "Discordant (non-zero) pairs: {n} — minimum attainable two-sided p: {floor:.4}\n\n"
+            )),
+            None => out.push_str(&format!("Discordant (non-zero) pairs: {n}\n\n")),
+        }
+    }
+
     // Header
     out.push_str(
         "| metric | tag | baseline | treatment | delta | W | p | d_z | CI 95% | verdict |\n",
@@ -101,8 +123,9 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
             _ => "—".to_string(),
         };
         let verdict_s = match row.verdict {
-            Some(true) => "PASS".to_string(),
-            Some(false) => "FAIL".to_string(),
+            Some(crate::score::GateOutcome::Pass) => "PASS".to_string(),
+            Some(crate::score::GateOutcome::Fail) => "FAIL".to_string(),
+            Some(crate::score::GateOutcome::Underpowered) => "UNDERPOWERED".to_string(),
             None => "—".to_string(),
         };
         out.push_str(&format!(
@@ -157,6 +180,31 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
             "Inconclusive: {} pair(s) excluded ({:.1}% of attempted) — artifacts, not capability misses\n",
             rec.inconclusive_count,
             rec.inconclusive_fraction * 100.0,
+        ));
+    }
+
+    // Underpowered banner — the whole point of #3 is that this cannot be mistaken for a
+    // pass, so it is stated in prose as well as in the verdict column.
+    if rec
+        .rows
+        .iter()
+        .any(|r| r.verdict == Some(crate::score::GateOutcome::Underpowered))
+    {
+        out.push('\n');
+        let floor = rec
+            .min_attainable_p
+            .map(|p| format!("{p:.4}"))
+            .unwrap_or_else(|| "N/A".to_string());
+        out.push_str(&format!(
+            "⚠ UNDERPOWERED — NOT A PASS. With {} discordant pair(s) the smallest two-sided \
+             p this battery could produce is {floor}, above the gate's alpha. No arrangement \
+             of the observed data could have failed this gate, so the absence of a confirmed \
+             regression is not evidence that none exists. Grow the battery (power comes from \
+             more DISCORDANT nodes, not more reps on nodes that already agree) before reading \
+             this result as \"no regression\".\n",
+            rec.n_discordant
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string()),
         ));
     }
 
@@ -215,7 +263,7 @@ mod tests {
                     d_z: Some(0.891),
                     ci_lower: Some(0.0),
                     ci_upper: Some(1.0),
-                    verdict: Some(true),
+                    verdict: Some(crate::score::GateOutcome::Underpowered),
                     wilcoxon_method: Some("ExactPratt".to_string()),
                     n_nonzero: Some(5),
                 },
@@ -245,6 +293,8 @@ mod tests {
             validity_warnings: vec![],
             inconclusive_count: 0,
             inconclusive_fraction: 0.0,
+            n_discordant: Some(5),
+            min_attainable_p: Some(0.0625),
         }
     }
 
@@ -324,6 +374,8 @@ mod tests {
             validity_warnings: vec![],
             inconclusive_count: 0,
             inconclusive_fraction: 0.0,
+            n_discordant: Some(5),
+            min_attainable_p: Some(0.0625),
         };
         let path = std::env::temp_dir().join("abproof-abort-test.json");
         write_result_json(&path, &rec).expect("write");
@@ -577,6 +629,8 @@ mod tests {
             validity_warnings: vec![],
             inconclusive_count: 0,
             inconclusive_fraction: 0.0,
+            n_discordant: Some(5),
+            min_attainable_p: Some(0.0625),
         };
         let md = render_r_table(&rec);
         assert!(md.contains("engine_broken_rate"));

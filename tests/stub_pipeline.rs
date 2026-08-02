@@ -192,7 +192,15 @@ fn stub_driver_treatment_passes_gate_exit_0() {
         "gated row must carry CI bounds"
     );
 
-    assert_eq!(rec.gate_exit, 0, "treatment passes floor → gate_exit = 0");
+    // Since #3 this single-node battery is UNDERPOWERED (n=1 → floor 1.0 > alpha), and the
+    // guard is direction-blind on purpose: treatment winning does not establish the absence
+    // of a regression a 1-node battery could never have detected. The rows above are what
+    // this test is really for — that a gated row carries its full statistics.
+    assert_eq!(
+        rec.gate_exit,
+        abproof::score::EXIT_UNDERPOWERED,
+        "one node cannot gate anything, however well the treatment did"
+    );
 
     // Call count: nodes.len() × reps × 2 arms.
     let expected_calls = nodes.len() as u64 * manifest.reps as u64 * 2;
@@ -204,12 +212,13 @@ fn stub_driver_treatment_passes_gate_exit_0() {
 }
 
 #[test]
-fn stub_driver_single_node_worse_is_underpowered_exit_0() {
+fn stub_driver_single_node_worse_is_underpowered_not_a_pass() {
     // Treatment fails, baseline succeeds → the point estimate is worse. But this battery
     // is a SINGLE node (py-add), so after per-node aggregation (issue #7, D2) the paired
-    // test has n=1 and can never reach significance (p=1.0). The gate therefore honestly
-    // reports "not a confirmed regression" (exit 0) rather than the old pseudo-replicated
+    // test has n=1 and can never reach significance (p=1.0) — not the old pseudo-replicated
     // false exit 1 that treated the 5 reps of one node as 5 independent observations.
+    // Since #3 it is not reported as a PASS either: at n=1 the minimum attainable p is
+    // 1.0, so this battery had no power to detect anything and says so (exit 4).
     let manifest = small_manifest();
     let nodes = load_py_add();
     let (driver, _) = ArmDistinctDriver::new(false, true);
@@ -241,10 +250,17 @@ fn stub_driver_single_node_worse_is_underpowered_exit_0() {
         row.p_two_sided
     );
     assert_eq!(
-        rec.gate_exit, 0,
-        "underpowered single node → not a confirmed regression (see \
+        rec.gate_exit,
+        abproof::score::EXIT_UNDERPOWERED,
+        "underpowered single node → neither a confirmed regression nor a pass (see \
          run::tests::e2e_confirmed_regression_over_enough_nodes_exits_1 for the exit-1 path)"
     );
+    assert_eq!(
+        row.verdict,
+        Some(abproof::score::GateOutcome::Underpowered),
+        "the verdict must name the reason, not silently read as PASS"
+    );
+    assert_eq!(rec.n_discordant, Some(1), "power denominator on the record");
 }
 
 #[test]
@@ -275,11 +291,13 @@ fn pairs_formed_per_node_rep_call_count() {
 
 #[test]
 fn gated_row_verdict_matches_gate_exit() {
-    // Invariant: the gated row's verdict is exactly `Some(gate_exit == 0)` — a PASS row
-    // reports Some(true), a regression row Some(false). Exercised here over the two
-    // single-node scenarios the fixture supports (both exit 0 after the D2 fix, since one
-    // node is underpowered); the exit-1 / Some(false) branch is covered with a multi-node
-    // battery in run::tests::e2e_confirmed_regression_over_enough_nodes_exits_1.
+    // Invariant: the gated row's verdict and the process exit code are two renderings of
+    // one decision and can never disagree. Since #3 the mapping is three-way —
+    // PASS↔0, FAIL↔1, UNDERPOWERED↔4 — which is the whole point: collapsing UNDERPOWERED
+    // into the PASS/0 bucket is the defect. Exercised here over the two single-node
+    // scenarios the fixture supports (both underpowered at n=1 after the D2 fix); the
+    // FAIL/1 branch is covered with a multi-node battery in
+    // run::tests::e2e_confirmed_regression_over_enough_nodes_exits_1.
     let manifest = small_manifest();
     let nodes = load_py_add();
     let baseline = baseline_floor_05();
@@ -303,10 +321,16 @@ fn gated_row_verdict_matches_gate_exit() {
             .iter()
             .find(|r| r.metric == "node_pass_rate")
             .unwrap();
+        let expected = match rec.gate_exit {
+            0 => abproof::score::GateOutcome::Pass,
+            1 => abproof::score::GateOutcome::Fail,
+            abproof::score::EXIT_UNDERPOWERED => abproof::score::GateOutcome::Underpowered,
+            other => panic!("{label}: unexpected gate_exit {other}"),
+        };
         assert_eq!(
             row.verdict,
-            Some(rec.gate_exit == 0),
-            "{label}: verdict must equal Some(gate_exit == 0)"
+            Some(expected),
+            "{label}: verdict and gate_exit must be the same decision"
         );
     }
 }

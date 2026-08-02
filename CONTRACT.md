@@ -25,6 +25,15 @@ declared: `tests/id-guard/vectors.json` is a byte-identical copy of the family's
 adversarial corpus, this guard is judged against it in CI, and the upstream twin's CI diffs the
 copy. A guard that is stricter or laxer than its sibling fails a test rather than a review.
 
+The **statistics** twins are shared the same way, and for a sharper reason.
+`tests/power-guard/vectors.json` is a byte-identical copy of the canonical
+`(n_discordant, alpha) → verdict` corpus; both this crate's minimum-power guard and the
+consumer's in-tree twin are judged against it. `dotclaude measure run` invokes abproof as a
+container and **fails open to that in-tree twin** (ADR-0055), so two implementations that
+disagree mean the fallback silently applies different verdict semantics from the container
+— on the guard whose whole job is refusing to call an unfailable battery a PASS. That path
+is not hypothetical: the framework's only experiment ran on it.
+
 **Refused, never rewritten.** Sanitizing a bad id into a legal one (`a/b` → `a_b`) would be safe
 and dishonest: the run, its temp artifact, and every report derived from them would describe a node
 identity that is not in the corpus. That is the same fail-loud rule as above, applied to input — a
@@ -41,7 +50,8 @@ abproof run <manifest.yaml> [--dry-run | --confirm] [--out <path>] [--max-cost <
 - `--dry-run`: projection only, exit 0.
 - `--confirm`: runs the seed-blocked A/B; `--max-calls` pre-flight-refuses (exit 64) if the
   projection exceeds the cap; `--max-cost` aborts mid-battery (exit 3) rather than overspending.
-- Exit: `0` pass · `1` setup error · `3` aborted · `64` usage · otherwise the gate's own code.
+- Exit: `0` pass · `1` setup error · `3` aborted · `4` underpowered (alpha unreachable — **not** a
+  pass) · `64` usage · otherwise the gate's own code.
 
 Run-time inputs are resolved by env (`ABPROOF_CORPUS`, `ABPROOF_EXECUTE_NODE`, `ABPROOF_RESULTS`),
 each falling back to a walk-up from the CWD so it works inside a checkout without configuration.
@@ -88,8 +98,10 @@ the run when it also clears statistical significance on the paired test over the
 **per-node** deltas:
 
 ```
-worse     = treatment_arm_value < baseline_arm_value - tolerance   // both in-run, this experiment
-regressed = worse && p_two_sided < alpha                           // alpha defaults to 0.05
+worse        = treatment_arm_value < baseline_arm_value - tolerance   // both in-run, this experiment
+underpowered = min_attainable_p(n_discordant) > alpha                 // 2/2^n; alpha defaults to 0.05
+regressed    = worse && !underpowered && p_two_sided < alpha
+outcome      = UNDERPOWERED if underpowered else (FAIL if regressed else PASS)
 ```
 
 Both halves reference the **in-run baseline arm** — the same series the p-value is computed
@@ -101,11 +113,25 @@ warns rather than aborting.
 
 `alpha` is `Manifest.gate_alpha` when set (validated to `(0.0, 1.0)`), else `0.05`. A metric
 with no paired-delta series to test (`p_two_sided: None`) falls back to the bare point-estimate
-rule. **Small-n consequence, stated honestly:** the significance test's `n` is the **node
-count**, so the lever for statistical power is the **battery size**, not `reps` (which only
-sharpens each node's rate). A run over too few nodes — even at high `reps` — cannot reach
-`p < alpha` for a real effect and honestly reports "not a confirmed regression", exiting 0
-rather than failing on a point estimate it cannot statistically back up.
+rule.
+
+**The minimum-power guard: an underpowered battery is not a PASS.** The significance test's `n`
+is the **node count**, so the lever for statistical power is the **battery size**, not `reps`
+(which only sharpens each node's rate). The exact two-sided sign-flip test has a hard floor of
+`2/2ⁿ` at `n` discordant pairs — only the all-positive and all-negative assignments reach the
+extreme deviation, out of `2ⁿ` — so `α = 0.05` is unreachable at `n ≤ 5` and reachable from
+`n = 6`.
+
+A run below that threshold could not have failed its own gate at any effect size. It reports the
+distinct `UNDERPOWERED` verdict and exits **4**, never a PASS/0: "we couldn't have found a
+regression" is a different claim from "we looked and found none", and conflating them is how an
+underpowered null gets read as evidence of no effect. The guard is **direction-blind** — a
+battery with no power to detect a regression did not establish its absence just because the point
+estimate improved.
+
+`regressed` and `UNDERPOWERED` are mutually exclusive by construction, so the confirmed-regression
+path is unchanged on any powered battery. Every result carries `n_discordant` (the power
+denominator) and `min_attainable_p` alongside the realised `p`.
 
 ## Compatibility
 
