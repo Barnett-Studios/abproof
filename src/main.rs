@@ -140,12 +140,10 @@ fn main() {
         script: execute_node_path(),
         timeout: std::time::Duration::from_secs(300),
     };
-    let judge = abproof::judge::StubJudge {
-        canned: abproof::judge::JudgeScore {
-            per_criterion: Default::default(),
-            total: 0,
-        },
-    };
+    // #8: no judge is wired, so say so. A StubJudge scoring 0 reported judge_quality as
+    // a fabricated 0.0 — a number a consumer reads as "measured, and it was the worst
+    // possible". AbsentJudge fails every call, so the metric is reported ABSENT instead.
+    let judge = abproof::judge::AbsentJudge;
     let opts = abproof::run::RunOptions { max_cost };
     let record = abproof::run::run_experiment(&manifest, &nodes, &driver, &judge, &baseline, &opts);
 
@@ -256,12 +254,10 @@ fn run_json(input: &str) -> Result<String, String> {
         script: execute_node_path(),
         timeout: std::time::Duration::from_secs(300),
     };
-    let judge = abproof::judge::StubJudge {
-        canned: abproof::judge::JudgeScore {
-            per_criterion: Default::default(),
-            total: 0,
-        },
-    };
+    // #8: no judge is wired, so say so. A StubJudge scoring 0 reported judge_quality as
+    // a fabricated 0.0 — a number a consumer reads as "measured, and it was the worst
+    // possible". AbsentJudge fails every call, so the metric is reported ABSENT instead.
+    let judge = abproof::judge::AbsentJudge;
     let opts = abproof::run::RunOptions {
         max_cost: req.max_cost,
     };

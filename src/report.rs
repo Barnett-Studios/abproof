@@ -70,6 +70,11 @@ pub struct ResultRecord {
     /// gate's `alpha`, the battery could not have failed its own gate at any effect
     /// size. `None` when the run aborted before a paired test ran.
     pub min_attainable_p: Option<f64>,
+    /// Metrics the manifest declared that produced no row because nothing measured them —
+    /// an unconfigured judge, an unwired source. Named rather than merely omitted so a
+    /// reader can tell "declared and unmeasured" from "never in scope", and reported as
+    /// ABSENT rather than as a fabricated `0.0` (#8).
+    pub absent_metrics: Vec<String>,
 }
 
 /// Render a Markdown R-table summarising the experiment result.
@@ -180,6 +185,16 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
             "Inconclusive: {} pair(s) excluded ({:.1}% of attempted) — artifacts, not capability misses\n",
             rec.inconclusive_count,
             rec.inconclusive_fraction * 100.0,
+        ));
+    }
+
+    // Absent metrics — declared, unmeasured, and named as such. A reader who sees no
+    // judge_quality row must not be left to guess whether it was out of scope or missing.
+    if !rec.absent_metrics.is_empty() {
+        out.push('\n');
+        out.push_str(&format!(
+            "ABSENT (declared but not measured — no value, NOT 0.0): {}\n",
+            rec.absent_metrics.join(", ")
         ));
     }
 
@@ -295,6 +310,7 @@ mod tests {
             inconclusive_fraction: 0.0,
             n_discordant: Some(5),
             min_attainable_p: Some(0.0625),
+            absent_metrics: vec!["engine_broken_rate".to_string()],
         }
     }
 
@@ -376,6 +392,7 @@ mod tests {
             inconclusive_fraction: 0.0,
             n_discordant: Some(5),
             min_attainable_p: Some(0.0625),
+            absent_metrics: vec!["engine_broken_rate".to_string()],
         };
         let path = std::env::temp_dir().join("abproof-abort-test.json");
         write_result_json(&path, &rec).expect("write");
@@ -631,6 +648,7 @@ mod tests {
             inconclusive_fraction: 0.0,
             n_discordant: Some(5),
             min_attainable_p: Some(0.0625),
+            absent_metrics: vec!["engine_broken_rate".to_string()],
         };
         let md = render_r_table(&rec);
         assert!(md.contains("engine_broken_rate"));
