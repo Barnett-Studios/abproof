@@ -640,12 +640,26 @@ pub fn run_experiment(
                 // real data; missing judge data means the seam returned no scores).
             }
             // engine_broken_rate: no v1 source wired; will return in v2 with real
-            // engine telemetry. Removed to avoid shipping fabricated zeros.
+            // engine telemetry. Emitting nothing avoids shipping fabricated zeros —
+            // the `absent_metrics` sweep below then names it, so "unwired" is reported
+            // rather than merely silent.
             _ => {
                 // Unknown tracked metric — skip rather than panic or fabricate.
             }
         }
     }
+
+    // #8: a metric the manifest declared but nothing measured is ABSENT, and is named as
+    // such. Derived from the rows actually emitted rather than from a hand-kept list, so
+    // it cannot drift out of step with what the emitters above do — any tracked metric
+    // that fails to produce a row lands here by construction, whether that is an
+    // unconfigured judge or a source that was never wired.
+    let absent_metrics: Vec<String> = manifest
+        .tracked_metrics()
+        .into_iter()
+        .filter(|m| !rows.iter().any(|r| r.metric == *m))
+        .map(str::to_string)
+        .collect();
 
     // ── wellformed% / pass@1 / pass@2 ───────────────────────────────────────
     // Always emitted when there is non-skipped run data; not manifest-driven.
@@ -702,6 +716,7 @@ pub fn run_experiment(
         abort_reason: None,
         n_discordant: Some(wilcoxon.n_nonzero),
         min_attainable_p: Some(wilcoxon.min_attainable_p),
+        absent_metrics,
         total_cost_usd,
         baseline_cost_usd,
         treatment_cost_usd,
@@ -769,6 +784,9 @@ fn abort_record(
         // "measured, and it had no power", which is a different claim.
         n_discordant: None,
         min_attainable_p: None,
+        // An abort produced no rows at all, so "which declared metric is missing" is not
+        // the interesting fact — `abort_reason` is. Listing every metric here would bury it.
+        absent_metrics: Vec::new(),
         total_cost_usd: Some(cum_cost),
         baseline_cost_usd: Some(baseline_cost),
         treatment_cost_usd: Some(treatment_cost),
@@ -1554,6 +1572,136 @@ mod tests {
             "underpowered → neither a confirmed regression (1) nor a pass (0)"
         );
         assert_eq!(row.verdict, Some(score::GateOutcome::Underpowered));
+    }
+
+    // ── #8: an unmeasured metric is ABSENT, never 0.0 ─────────────────────────
+
+    /// `manifest_n_nodes_both_local` plus the two tracked quality metrics declared.
+    /// Declaring them is what makes their absence reportable: an undeclared metric is
+    /// simply out of scope, a declared-but-unmeasured one is a hole the report must name.
+    fn manifest_with_quality_metrics(ids: &[&str]) -> Manifest {
+        let mut m = manifest_n_nodes_both_local(ids);
+        m.metrics
+            .insert("judge_quality".to_string(), MetricTag::Tracked);
+        m.metrics
+            .insert("engine_broken_rate".to_string(), MetricTag::Tracked);
+        m
+    }
+
+    fn record_with_no_judge() -> ResultRecord {
+        let ids = ["n1", "n2", "n3"];
+        let m = manifest_with_quality_metrics(&ids);
+        let nodes: Vec<_> = ids.iter().map(|id| make_node(id)).collect();
+        run_experiment(
+            &m,
+            &nodes,
+            &all_treatment_worse(&ids),
+            &judge::AbsentJudge,
+            &baseline_070(),
+            &RunOptions { max_cost: None },
+        )
+    }
+
+    #[test]
+    fn no_judge_configured_emits_no_numeric_judge_quality() {
+        // The defect: production wired a StubJudge scoring 0, so judge_quality was
+        // reported as 0.0 — a number, which every consumer reads as "quality measured,
+        // and it was the worst possible". There must be no number to read at all.
+        let rec = record_with_no_judge();
+        assert!(
+            rec.rows.iter().all(|r| r.metric != "judge_quality"),
+            "an unmeasured judge must not produce a numeric row; rows: {:?}",
+            rec.rows.iter().map(|r| &r.metric).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn declared_but_unmeasured_metrics_are_named_absent() {
+        // Silence is not enough: a reader must be able to tell "this metric was declared
+        // and we failed to measure it" from "this metric was never in scope".
+        // engine_broken_rate has no wired source at all, so it lands here for the same
+        // reason as the absent judge, via the same rule.
+        let rec = record_with_no_judge();
+        assert!(
+            rec.absent_metrics.iter().any(|m| m == "judge_quality"),
+            "judge_quality must be marked ABSENT; got {:?}",
+            rec.absent_metrics
+        );
+        assert!(
+            rec.absent_metrics.iter().any(|m| m == "engine_broken_rate"),
+            "engine_broken_rate is declared but has no wired source; got {:?}",
+            rec.absent_metrics
+        );
+    }
+
+    #[test]
+    fn absent_metrics_are_never_silently_a_gated_pass() {
+        // A metric that could not be measured must not contribute to a green verdict.
+        // It is tracked, so it never gated — this pins that it also never sneaks into
+        // the rows as a value that a downstream gate could later read as 0.0.
+        let rec = record_with_no_judge();
+        for absent in &rec.absent_metrics {
+            assert!(
+                rec.rows.iter().all(|r| &r.metric != absent),
+                "{absent} is both marked absent and emitted as a row — pick one"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_report_says_absent_and_never_prints_a_judge_zero() {
+        // The rendered artifact is what a human actually reads, so the marker has to
+        // survive rendering — not merely exist in the JSON.
+        let rec = record_with_no_judge();
+        let table = crate::report::render_r_table(&rec);
+        assert!(
+            table.contains("ABSENT"),
+            "rendered report must carry an explicit ABSENT marker:\n{table}"
+        );
+        assert!(
+            table.contains("judge_quality"),
+            "the ABSENT marker must name the metric:\n{table}"
+        );
+        for line in table.lines().filter(|l| l.contains("judge_quality")) {
+            assert!(
+                !line.contains("0.000"),
+                "judge_quality must never render as a numeric score: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wired_judge_still_reports_its_real_score() {
+        // The guard must not swallow genuine judge data. A configured judge scoring 3
+        // still produces a numeric row and is NOT marked absent — otherwise the fix
+        // would trade a false zero for a false absence.
+        let ids = ["n1", "n2", "n3"];
+        let m = manifest_with_quality_metrics(&ids);
+        let nodes: Vec<_> = ids.iter().map(|id| make_node(id)).collect();
+        let scoring_judge = judge::StubJudge {
+            canned: judge::JudgeScore {
+                per_criterion: Default::default(),
+                total: 3,
+            },
+        };
+        let rec = run_experiment(
+            &m,
+            &nodes,
+            &all_treatment_worse(&ids),
+            &scoring_judge,
+            &baseline_070(),
+            &RunOptions { max_cost: None },
+        );
+        let row = rec
+            .rows
+            .iter()
+            .find(|r| r.metric == "judge_quality")
+            .expect("a wired judge must produce a judge_quality row");
+        assert!((row.baseline - 3.0).abs() < 1e-12, "real score preserved");
+        assert!(
+            !rec.absent_metrics.iter().any(|m| m == "judge_quality"),
+            "a measured metric must not be marked absent"
+        );
     }
 
     // ── #3: minimum-power guard — a battery that cannot reach alpha is not a PASS ──
