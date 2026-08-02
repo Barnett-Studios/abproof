@@ -187,6 +187,21 @@ for the rates and scores — with `every_tracked_metric_has_a_known_direction` f
 build if a new metric arrives without one, since an unknown direction means *never
 alarmed*, which is the original defect one level down.
 
+A **zero baseline** is reported, not exempted:
+
+```
+UNGATED REGRESSION — moved the wrong way and did not fail the run
+  (>= 5% materiality, NOT a significance test): engine_broken_rate from zero (unbounded), …
+```
+
+Materiality is a *relative* threshold and zero has no relative change to divide by, so the
+first cut of this alarm returned "no regression" for a zero baseline. That silence covered
+the two shapes the alarm exists for: `engine_broken_rate`'s healthy baseline is exactly
+zero, so 0% -> 40% broken was unreportable, and a free-local-baseline vs paid-treatment
+run has `baseline_cost_usd = 0` by construction. Direction still decides — a metric
+climbing off zero the *right* way stays silent — and an unbounded move sorts ahead of every
+finite one on the line.
+
 `gated` and `ungated` are a **partition** over what *this run actually produced*. `gated`
 is read from the emitted rows; `ungated` is every other emitted row, plus `cost_usd` when a
 paid call ran, minus anything gated. Gating a dimension removes it from the ungated list in
