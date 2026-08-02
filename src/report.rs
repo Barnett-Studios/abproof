@@ -110,10 +110,16 @@ fn worse_when_higher(metric: &str) -> Option<bool> {
 ///
 /// A **zero baseline** returns `f64::INFINITY` rather than `None` when the move is the wrong
 /// way. There is no relative change to divide by, but the direction is not in doubt, and the
-/// materiality filter must not read "undefined" as "immaterial": the cross-loop experiment
-/// pits a free local baseline against a paid treatment, and `engine_broken_rate`'s *healthy*
-/// baseline is exactly zero — so the two shapes this alarm exists for are both zero-baseline
-/// by construction. The caller words the infinity; it never reaches a `%` format.
+/// materiality filter must not read "undefined" as "immaterial". The caller words the
+/// infinity; it never reaches a `%` format.
+///
+/// Scoped to what v1 actually emits: the live case is **cost**, where a free local baseline
+/// against a paid treatment gives `baseline_cost_usd == 0.0` by construction. The two row
+/// metrics v1 emits — `node_pass_rate` and `judge_quality` — are both lower-is-worse, so a
+/// zero baseline on either can only move the *right* way and stays silent regardless.
+/// `engine_broken_rate` is the case this guard is built for and cannot exercise yet: it is
+/// unwired in v1 and reports ABSENT, and its healthy baseline is exactly zero, so it becomes
+/// the load-bearing one the day v2 wires a source.
 fn ungated_regression(metric: &str, baseline: f64, treatment: f64) -> Option<f64> {
     let higher_is_worse = worse_when_higher(metric)?;
     if !baseline.is_finite() || !treatment.is_finite() {
@@ -839,11 +845,19 @@ mod tests {
     ///
     /// The materiality filter is expressed as a *relative* change, and zero has no relative
     /// change to divide by — so the first cut of this alarm returned `None` for a zero
-    /// baseline and dropped the move entirely. That silence lands on exactly the shapes the
-    /// alarm exists for: the cross-loop experiment runs a free local baseline against a paid
-    /// treatment (`measurement/experiments/cross-loop-local-vs-claude.yaml`), so a
-    /// $0 -> $1.06 cost regression had a zero baseline by construction; and `engine_broken_rate`
-    /// has a *healthy* baseline of exactly zero, so 0% -> 40% broken was unreportable.
+    /// baseline and dropped the move entirely.
+    ///
+    /// **The live v1 case is cost.** The cross-loop experiment runs a free local baseline
+    /// against a paid treatment (`measurement/experiments/cross-loop-local-vs-claude.yaml`,
+    /// `backend: local` vs `backend: claude-cli`), and the local rung reports `cost_usd=0.0`
+    /// rather than `unknown` — so a $0 -> $1.06 regression has a zero baseline by
+    /// construction, in the experiment shape where cost matters most.
+    ///
+    /// **`engine_broken_rate` is not yet reachable, and is stated here as the forward case.**
+    /// It is unwired in v1 and reports ABSENT, so 0% -> 40% broken cannot occur as a row
+    /// today. Its healthy baseline is exactly zero, so it becomes the load-bearing case when
+    /// v2 wires a source. Both v1 row metrics (`node_pass_rate`, `judge_quality`) are
+    /// lower-is-worse, so a zero baseline on either can only be an improvement.
     ///
     /// The direction still decides — zero is a floor, and a metric climbing off it is only
     /// an alarm when climbing is the wrong way.
@@ -865,6 +879,11 @@ mod tests {
     ///
     /// It also sorts ahead of every finite regression: an unbounded move is the worst one
     /// on the line, and the line is read left to right.
+    ///
+    /// The fixture is a **v2 shape**, deliberately: `engine_broken_rate` is unwired in v1 and
+    /// reports ABSENT rather than reaching a row. The renderer is generic over metrics, so
+    /// this exercises the wording and ordering against the case the guard exists for, before
+    /// a source makes it producible. The live v1 path is cost, covered separately.
     #[test]
     fn a_zero_baseline_regression_renders_and_sorts_first() {
         let mut rec = sample_result_record();

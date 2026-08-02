@@ -186,12 +186,21 @@ UNGATED REGRESSION — moved the wrong way and did not fail the run
 ```
 
 Materiality is a *relative* threshold and zero has no relative change to divide by, so the
-first cut of this alarm returned "no regression" for a zero baseline. That silence covered
-the two shapes the alarm exists for: `engine_broken_rate`'s healthy baseline is exactly
-zero, so 0% -> 40% broken was unreportable, and a free-local-baseline vs paid-treatment
-run has `baseline_cost_usd = 0` by construction. Direction still decides — a metric
-climbing off zero the *right* way stays silent — and an unbounded move sorts ahead of every
-finite one on the line.
+first cut of this alarm returned "no regression" for a zero baseline.
+
+**In v1 the live case is cost.** A free-local-baseline vs paid-treatment run has
+`baseline_cost_usd = 0` by construction — the local rung reports `cost_usd=0.0`, not
+`unknown` — so a $0 -> $1.06 regression had nothing to divide by. The two row metrics v1
+emits, `node_pass_rate` and `judge_quality`, are both lower-is-worse, so a zero baseline on
+either can only be an improvement and is correctly silent either way.
+
+**`engine_broken_rate` is the forward case, not a current one.** Its healthy baseline is
+exactly zero, which makes it the load-bearing case for this guard — but it is unwired in v1
+and reports ABSENT, so 0% -> 40% broken cannot occur as a row today. The guard is correct
+before its motivating metric exists rather than after.
+
+Direction still decides — a metric climbing off zero the *right* way stays silent — and an
+unbounded move sorts ahead of every finite one on the line.
 
 `gated` and `ungated` are a **partition** over what *this run actually produced*. `gated`
 is read from the emitted rows; `ungated` is every other emitted row, plus `cost_usd` when a
