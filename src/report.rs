@@ -77,27 +77,19 @@ pub struct ResultRecord {
     pub absent_metrics: Vec<String>,
 }
 
-/// Every dimension this harness measures, in report order — the single declaration the
-/// gate-scope footer is derived from.
+/// Dimensions that are measured and reported but never emitted as a row — the footer
+/// carries them instead.
 ///
-/// It exists because the footer's two lists must be a partition, and a hand-maintained
-/// "and also these" tail cannot be one. Some of these surface as rows and some do not
-/// (`cost_usd` and `duration` are reported in the footer), which is why the list cannot be
-/// recovered from the emitted rows alone.
+/// This exists only because the gate-scope statement cannot be recovered from the rows
+/// alone: cost and duration have no row, so a purely row-derived "ungated" list drops them
+/// and a reader could reasonably assume the gate covers them.
 ///
-/// Adding a dimension here is what puts it in the report's scope statement. A dimension
-/// that emits a row without being listed here is still named — see `render_r_table` — so a
-/// missed entry degrades to a sorting nit rather than a false claim of completeness.
-pub const MEASURED_DIMENSIONS: &[&str] = &[
-    "node_pass_rate",
-    "judge_quality",
-    "engine_broken_rate",
-    "wellformed_pct",
-    "pass_at_1",
-    "pass_at_2",
-    "cost_usd",
-    "duration",
-];
+/// It is deliberately NOT a list of every dimension the harness knows about. An earlier
+/// version was, and that over-claimed: the ungated line says "measured, never gated", so
+/// naming a dimension there asserts this run measured it. A declared-but-unmeasured metric
+/// is reported ABSENT (`ResultRecord::absent_metrics`) and must not also appear as
+/// measured — the report would contradict itself two lines apart.
+pub const UNROWED_DIMENSIONS: &[&str] = &["cost_usd", "duration"];
 
 /// Render a Markdown R-table summarising the experiment result.
 ///
@@ -217,7 +209,7 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
     // is stated: otherwise a PASS silently reads as "nothing regressed".
     //
     // The two lists are a PARTITION of the dimensions this run knows about, computed as a
-    // set difference from `MEASURED_DIMENSIONS` — not a derived list with a hand-written
+    // set difference over the rows plus `UNROWED_DIMENSIONS` — not a derived list with a hand-written
     // tail appended. The earlier version appended `["cost_usd", "duration"]`
     // unconditionally, so gating either would have produced a report claiming the gate
     // both covered and did not cover it. A scope statement that can contradict itself is
@@ -235,10 +227,11 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
             .map(|r| r.metric.as_str())
             .collect();
         if !gated.is_empty() {
-            let mut ungated: Vec<&str> = MEASURED_DIMENSIONS
+            let mut ungated: Vec<&str> = rec
+                .rows
                 .iter()
-                .copied()
-                .chain(rec.rows.iter().map(|r| r.metric.as_str()))
+                .map(|r| r.metric.as_str())
+                .chain(UNROWED_DIMENSIONS.iter().copied())
                 .filter(|d| !gated.contains(d))
                 .collect();
             let mut seen = std::collections::HashSet::new();
@@ -646,36 +639,58 @@ mod tests {
         );
     }
 
-    /// Every declared dimension reaches the report — gated or ungated, never silently
-    /// omitted. Deriving the list purely from emitted rows would satisfy the test above
-    /// and still lose any dimension that produces no row, which is how `cost_usd` came to
-    /// be appended by hand in the first place.
+    /// The dimensions with no row still reach the report.
     ///
-    /// Scope, stated so this is not mistaken for more than it is: this guards the *wiring*
-    /// between `MEASURED_DIMENSIONS` and the renderer, not the soundness of the partition.
-    /// Given an implementation that iterates the registry, most of it holds by
-    /// construction; what it would actually catch is a future renderer that stops
-    /// consuming the registry — reintroducing a hand-written tail, or adding a ninth
-    /// dimension that nothing reads. The partition property itself is tested above.
+    /// Deriving the ungated list purely from emitted rows would satisfy the partition test
+    /// above and still drop cost and duration, which is how they came to be appended by
+    /// hand in the first place.
     #[test]
-    fn every_declared_dimension_reaches_the_report() {
+    fn unrowed_dimensions_still_reach_the_report() {
         let rec = sample_result_record();
         let table = render_r_table(&rec);
-        let covers = table
-            .lines()
-            .find(|l| l.starts_with("Gate covers:"))
-            .expect("gate-scope footer must render");
         let ungated = table
             .lines()
             .find(|l| l.starts_with("UNGATED"))
             .expect("ungated line must render");
 
-        for dim in MEASURED_DIMENSIONS {
+        for dim in UNROWED_DIMENSIONS {
             assert!(
-                covers.contains(dim) || ungated.contains(dim),
-                "measured dimension '{dim}' appears in neither line:\n  {covers}\n  {ungated}"
+                ungated.contains(dim),
+                "'{dim}' has no row, so only this list can name it:\n  {ungated}"
             );
         }
+    }
+
+    /// A metric reported ABSENT must not also be reported as measured.
+    ///
+    /// The ungated line reads "measured, never gated", so naming a dimension there asserts
+    /// this run measured it. An earlier version of the gate-scope footer was built from a
+    /// static registry of every known dimension, which said exactly that about metrics the
+    /// same report declared ABSENT two lines below — the report contradicting itself, in
+    /// the paragraph whose job is stating scope accurately. Same defect this footer exists
+    /// to prevent, introduced by the footer.
+    #[test]
+    fn an_absent_metric_is_never_also_reported_as_measured() {
+        let mut rec = sample_result_record();
+        // judge_quality is declared but unmeasured: drop its row and name it absent.
+        rec.rows.retain(|r| r.metric != "judge_quality");
+        rec.absent_metrics = vec!["judge_quality".to_string()];
+
+        let table = render_r_table(&rec);
+        let ungated = table
+            .lines()
+            .find(|l| l.starts_with("UNGATED"))
+            .expect("ungated line must render");
+        let absent = table
+            .lines()
+            .find(|l| l.starts_with("ABSENT"))
+            .expect("absent line must render");
+
+        assert!(absent.contains("judge_quality"), "absent line: {absent}");
+        assert!(
+            !ungated.contains("judge_quality"),
+            "judge_quality is ABSENT, yet the report also calls it measured:\n  {ungated}\n  {absent}"
+        );
     }
 
     // ── wellformed_pct / pass@1 / pass@2 rendering ───────────────────────────

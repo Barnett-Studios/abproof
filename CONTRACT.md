@@ -149,19 +149,25 @@ UNGATED (measured, never gated — a regression in these does NOT fail the run):
   wellformed_pct, pass_at_1, pass_at_2, judge_quality, cost_usd, duration
 ```
 
-The two lists are a **partition**: `MEASURED_DIMENSIONS` (`src/report.rs`) declares every
-dimension the harness measures, `gated` is read from the emitted rows, and `ungated` is the
-difference. Gating a dimension therefore removes it from the ungated list in the same step,
-and no dimension can appear in both.
+`gated` and `ungated` are a **partition**. `gated` is read from the emitted rows;
+`ungated` is every other emitted row plus `UNROWED_DIMENSIONS` (`src/report.rs` —
+`cost_usd` and `duration`, which are measured and reported in the footer but never get a
+row), minus anything gated. Gating a dimension therefore removes it from the ungated list
+in the same step, and no dimension can appear in both.
 
-This is stronger than deriving the list from the rows, which is what the first version did
-before appending `cost_usd` and `duration` by hand. Neither is a row — they are reported in
-the footer — so row-derivation alone drops them, and appending them by hand meant gating
-either would have produced a report claiming the gate both covered and did not cover it.
+Two failure modes are ruled out by construction, and both were shipped before being caught:
 
-A dimension that reaches a row without being declared in `MEASURED_DIMENSIONS` is still
-named, so a missed entry costs report ordering rather than a silent omission from a list
-the reader is entitled to read as complete.
+- Appending `cost_usd`/`duration` to a row-derived list by hand. Gating either would then
+  have produced a report claiming the gate both covered and did not cover it.
+- Building `ungated` from a static registry of every dimension the harness knows about.
+  This line says **measured**, never gated — so naming a dimension here asserts *this run
+  measured it*. A declared-but-unmeasured metric is reported ABSENT (below), and a static
+  registry listed those as measured two lines above the line calling them unmeasured.
+
+Hence the narrow scope of `UNROWED_DIMENSIONS`: it answers only "what did this run measure
+that has no row", which is a fixed, short list. Everything else is evidence from the run
+itself. The three buckets a declared dimension can land in are **gated**, **ungated**, and
+**ABSENT** — and they do not overlap.
 
 A PASS from abproof means "solve-rate did not regress", not "nothing regressed". Read the
 tracked deltas before concluding a change is safe.
