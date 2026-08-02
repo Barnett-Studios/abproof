@@ -144,19 +144,48 @@ minor change rather than a breaking one — which it was not when `InvalidNode` 
 
 ## What a PASS does and does not cover
 
-`node_pass_rate` is the **sole gated metric**. One pre-registered metric is a deliberate
-choice — it avoids the multiple-comparisons trap that a panel of gated dimensions would
-introduce — but it has a consequence worth stating plainly: **a treatment that holds
-solve-rate while regressing anything else still exits 0.** Double the token cost, halved
-`wellformed_pct`, a large latency increase, a quality drop: all PASS.
+`node_pass_rate` is the **sole gated metric**, and the consequence is worth stating
+plainly: **a treatment that holds solve-rate while regressing anything else still exits
+0.** Double the token cost, halved `wellformed_pct`, a quality drop — all PASS.
 
-So every report names both sides:
+**Why not gate a panel.** Not because of the multiple-comparisons trap: a Holm correction
+over a small pre-declared panel handles that cheaply, and saying otherwise would be
+restating the problem the correction exists to solve. The reason is that gating a metric
+requires a **pre-registered tolerance** — how much cost regression is a failure? measured
+against which reference, the in-run baseline arm or the committed baseline? — and those
+are measurement-design decisions that need data to set and a decision to record. Inventing
+them inside a reporting change would put numbers into a gate that nobody chose. The panel
+is a live option; it is a *pre-registration* task, not a formatting one.
+
+Until then a PASS must not read as "nothing regressed", so every report names both sides —
+the scope, always:
 
 ```
 Gate covers: node_pass_rate.
 UNGATED (measured, never gated — a regression in these does NOT fail the run):
-  wellformed_pct, pass_at_1, pass_at_2, judge_quality, cost_usd, duration
+  judge_quality, wellformed_pct, pass_at_1, pass_at_2, cost_usd
 ```
+
+**and the alarm, only when something actually moved the wrong way:**
+
+```
+UNGATED REGRESSION — moved the wrong way and did not fail the run
+  (>= 5% materiality, NOT a significance test): cost_usd +112.0%, wellformed_pct -50.0%
+```
+
+The distinction is the whole point. The scope line states policy and prints identically
+whether cost doubled or held, so on its own a 2x cost regression produced byte-identical
+output to a flat run and the reader had to find it unaided in the deltas — which is what
+"silently PASS" means. The alarm fires only on movement, so it stays an alarm rather than
+becoming a second banner that trains readers to skip it.
+
+Two honesty constraints on that line. It is a **materiality** threshold, never a
+significance claim: no ungated dimension has a paired-delta series in the record, so there
+is no test to run, and the threshold is printed so a reader knows what was filtered. And
+direction is per-metric — higher is worse for `cost_usd` and `engine_broken_rate`, lower
+for the rates and scores — with `every_tracked_metric_has_a_known_direction` failing the
+build if a new metric arrives without one, since an unknown direction means *never
+alarmed*, which is the original defect one level down.
 
 `gated` and `ungated` are a **partition** over what *this run actually produced*. `gated`
 is read from the emitted rows; `ungated` is every other emitted row, plus `cost_usd` when a

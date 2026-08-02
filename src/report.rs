@@ -77,6 +77,47 @@ pub struct ResultRecord {
     pub absent_metrics: Vec<String>,
 }
 
+/// Relative move, in the worse direction, at which an **ungated** dimension is called out.
+///
+/// This is a **materiality** threshold, not a significance one, and the distinction is not
+/// pedantry: no ungated dimension has a paired-delta series in the record, so there is no
+/// test to run and nothing here may be read as "significant". It exists to suppress
+/// rounding noise, and it is printed with the alarm so a reader knows what was filtered.
+///
+/// A dimension whose movement genuinely needs a verdict should be **gated** with a
+/// pre-registered tolerance — that is what gating is for. This line is for the ones that
+/// are not.
+pub const UNGATED_ALARM_REL: f64 = 0.05;
+
+/// Which direction is a regression for a given dimension: `Some(true)` when higher is
+/// worse, `Some(false)` when lower is worse, `None` when this report does not know.
+///
+/// `None` means the dimension is **never alarmed**, so an unlisted metric fails silently in
+/// exactly the way #4 is about. `every_tracked_metric_has_a_known_direction` keeps that
+/// from happening by accident rather than by anyone remembering this comment.
+fn worse_when_higher(metric: &str) -> Option<bool> {
+    match metric {
+        "cost_usd" | "engine_broken_rate" => Some(true),
+        "node_pass_rate" | "judge_quality" | "wellformed_pct" | "pass_at_1" | "pass_at_2" => {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+/// Relative change from `baseline` to `treatment`, in the worse direction, as a positive
+/// fraction — or `None` when the move is an improvement, is immaterial, or cannot be
+/// expressed relatively (`baseline == 0`, where every change is infinite).
+fn ungated_regression(metric: &str, baseline: f64, treatment: f64) -> Option<f64> {
+    let higher_is_worse = worse_when_higher(metric)?;
+    if baseline == 0.0 || !baseline.is_finite() || !treatment.is_finite() {
+        return None;
+    }
+    let signed = (treatment - baseline) / baseline.abs();
+    let worse_by = if higher_is_worse { signed } else { -signed };
+    (worse_by >= UNGATED_ALARM_REL).then_some(worse_by)
+}
+
 /// Render a Markdown R-table summarising the experiment result.
 ///
 /// One row per metric. Header notes the Wilcoxon method (Pratt zeros / average-rank ties)
@@ -241,6 +282,39 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
                 "UNGATED (measured, never gated — a regression in these does NOT fail the run): {}\n",
                 ungated.join(", ")
             ));
+
+            // …and, when one of them actually moved the wrong way, say so. The line above
+            // states the POLICY and prints identically whether cost doubled or held, so on
+            // its own a 2x cost regression produced byte-identical output to a flat run
+            // (#4 acceptance criterion 1). This fires only on movement, so it stays an
+            // alarm rather than becoming a second banner nobody reads.
+            let mut regressions: Vec<(&str, f64)> = ungated
+                .iter()
+                .filter_map(|m| {
+                    let row = rec.rows.iter().find(|r| r.metric == *m)?;
+                    ungated_regression(m, row.baseline, row.treatment).map(|by| (*m, by))
+                })
+                .collect();
+            if let (Some(b), Some(t)) = (rec.baseline_cost_usd, rec.treatment_cost_usd) {
+                if ungated.contains(&"cost_usd") {
+                    if let Some(by) = ungated_regression("cost_usd", b, t) {
+                        regressions.push(("cost_usd", by));
+                    }
+                }
+            }
+            if !regressions.is_empty() {
+                regressions.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let named: Vec<String> = regressions
+                    .iter()
+                    .map(|(m, by)| format!("{m} {:+.1}%", by * 100.0))
+                    .collect();
+                out.push_str(&format!(
+                    "UNGATED REGRESSION — moved the wrong way and did not fail the run \
+                     (>= {:.0}% materiality, NOT a significance test): {}\n",
+                    UNGATED_ALARM_REL * 100.0,
+                    named.join(", ")
+                ));
+            }
         }
     }
 
@@ -635,6 +709,126 @@ mod tests {
         assert!(
             !ungated.contains("cost_usd"),
             "cost_usd is gated here, yet the report also calls it ungated:\n  {covers}\n  {ungated}"
+        );
+    }
+
+    /// #4 acceptance criterion 1: an ungated regression must not pass silently.
+    ///
+    /// The scope line alone reports the *policy* — it prints identically whether cost
+    /// doubled or did not move, so a 2x cost regression produced byte-identical output to a
+    /// flat run and the reader had to spot it unaided in the deltas. That is what "silently
+    /// PASS" describes. #4 accepts either gating with a correction or **loud reporting**;
+    /// this is the loud-reporting branch.
+    #[test]
+    fn an_ungated_regression_is_reported_loudly() {
+        let mut rec = sample_result_record();
+        // Solve-rate holds (gated, passes) while cost more than doubles.
+        rec.total_claude_calls = 12;
+        rec.baseline_cost_usd = Some(0.50);
+        rec.treatment_cost_usd = Some(1.06);
+        rec.total_cost_usd = Some(1.56);
+        // ...and a tracked quality dimension drops hard.
+        rec.rows.push(MetricRow {
+            metric: "wellformed_pct".to_string(),
+            tag: "tracked".to_string(),
+            baseline: 0.90,
+            treatment: 0.45,
+            delta: -0.45,
+            w: None,
+            p_two_sided: None,
+            d_z: None,
+            ci_lower: None,
+            ci_upper: None,
+            verdict: None,
+            wilcoxon_method: None,
+            n_nonzero: None,
+        });
+
+        let table = render_r_table(&rec);
+        let alarm = table
+            .lines()
+            .find(|l| l.starts_with("UNGATED REGRESSION"))
+            .unwrap_or_else(|| panic!("no ungated-regression alarm rendered:\n{table}"));
+
+        assert!(
+            alarm.contains("cost_usd"),
+            "cost more than doubled: {alarm}"
+        );
+        assert!(
+            alarm.contains("wellformed_pct"),
+            "wellformedness halved: {alarm}"
+        );
+        assert!(
+            alarm.contains("did not fail the run"),
+            "the consequence must be spelled out, not inferred: {alarm}"
+        );
+    }
+
+    /// Every dimension that can reach a row has a known regression direction.
+    ///
+    /// `worse_when_higher` returning `None` means "never alarmed", so a metric missing from
+    /// it fails silently — the precise defect #4 exists to close, reintroduced one level
+    /// down. This pins the premise instead of trusting a comment to be read.
+    ///
+    /// The list is the emission sites in `run.rs` plus the two footer dimensions; if a new
+    /// metric is added there and not here, this fails rather than the metric quietly
+    /// becoming un-alarmable.
+    #[test]
+    fn every_tracked_metric_has_a_known_direction() {
+        for metric in [
+            "node_pass_rate",
+            "judge_quality",
+            "engine_broken_rate",
+            "wellformed_pct",
+            "pass_at_1",
+            "pass_at_2",
+            "cost_usd",
+        ] {
+            assert!(
+                worse_when_higher(metric).is_some(),
+                "'{metric}' has no regression direction, so it can never be alarmed"
+            );
+        }
+        // And the converse: an unknown metric must be inert rather than guessed at.
+        assert!(worse_when_higher("some_future_metric").is_none());
+    }
+
+    /// An improvement is never an alarm, in either direction convention.
+    #[test]
+    fn direction_is_respected_for_both_conventions() {
+        // cost: higher is worse.
+        assert!(ungated_regression("cost_usd", 1.0, 2.0).is_some());
+        assert!(ungated_regression("cost_usd", 2.0, 1.0).is_none());
+        // wellformed_pct: lower is worse.
+        assert!(ungated_regression("wellformed_pct", 0.9, 0.4).is_some());
+        assert!(ungated_regression("wellformed_pct", 0.4, 0.9).is_none());
+        // Immaterial moves are filtered, in both directions.
+        assert!(ungated_regression("cost_usd", 1.0, 1.01).is_none());
+        // A zero baseline has no relative change to report — and must not divide by it.
+        assert!(ungated_regression("cost_usd", 0.0, 5.0).is_none());
+    }
+
+    /// The alarm is an alarm, not a banner: silent when nothing regressed.
+    ///
+    /// A line that prints on every run is the static scope statement again, one paragraph
+    /// down — it would carry no information and would train a reader to skip it.
+    #[test]
+    fn no_alarm_when_no_ungated_dimension_regressed() {
+        let mut rec = sample_result_record();
+        rec.total_claude_calls = 12;
+        rec.baseline_cost_usd = Some(1.00);
+        rec.treatment_cost_usd = Some(0.90); // cheaper — an improvement
+        rec.total_cost_usd = Some(1.90);
+        for r in rec.rows.iter_mut().filter(|r| r.tag == "tracked") {
+            r.baseline = 0.50;
+            r.treatment = 0.60; // better
+            r.delta = 0.10;
+        }
+
+        let table = render_r_table(&rec);
+        assert!(
+            !table.contains("UNGATED REGRESSION"),
+            "nothing regressed, so nothing should be alarmed:\n{table}"
         );
     }
 
