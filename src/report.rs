@@ -77,20 +77,6 @@ pub struct ResultRecord {
     pub absent_metrics: Vec<String>,
 }
 
-/// Dimensions that are measured and reported but never emitted as a row — the footer
-/// carries them instead.
-///
-/// This exists only because the gate-scope statement cannot be recovered from the rows
-/// alone: cost and duration have no row, so a purely row-derived "ungated" list drops them
-/// and a reader could reasonably assume the gate covers them.
-///
-/// It is deliberately NOT a list of every dimension the harness knows about. An earlier
-/// version was, and that over-claimed: the ungated line says "measured, never gated", so
-/// naming a dimension there asserts this run measured it. A declared-but-unmeasured metric
-/// is reported ABSENT (`ResultRecord::absent_metrics`) and must not also appear as
-/// measured — the report would contradict itself two lines apart.
-pub const UNROWED_DIMENSIONS: &[&str] = &["cost_usd", "duration"];
-
 /// Render a Markdown R-table summarising the experiment result.
 ///
 /// One row per metric. Header notes the Wilcoxon method (Pratt zeros / average-rank ties)
@@ -209,7 +195,7 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
     // is stated: otherwise a PASS silently reads as "nothing regressed".
     //
     // The two lists are a PARTITION of the dimensions this run knows about, computed as a
-    // set difference over the rows plus `UNROWED_DIMENSIONS` — not a derived list with a hand-written
+    // set difference over the rows plus cost-when-measured — not a derived list with a hand-written
     // tail appended. The earlier version appended `["cost_usd", "duration"]`
     // unconditionally, so gating either would have produced a report claiming the gate
     // both covered and did not cover it. A scope statement that can contradict itself is
@@ -227,11 +213,24 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
             .map(|r| r.metric.as_str())
             .collect();
         if !gated.is_empty() {
+            // Cost has no row, so only this list can name it — but only when a paid call
+            // actually ran. The cost footer is omitted on local-only runs by design, and a
+            // dimension the report does not produce must not be described as measured.
+            //
+            // `duration` is deliberately absent. The driver times each run, but that never
+            // reaches `ResultRecord` or any output; naming it here would point a reader at
+            // a number the report does not contain. It belongs on this line the day it is
+            // reported, not before.
+            let unrowed: &[&str] = if rec.total_claude_calls > 0 {
+                &["cost_usd"]
+            } else {
+                &[]
+            };
             let mut ungated: Vec<&str> = rec
                 .rows
                 .iter()
                 .map(|r| r.metric.as_str())
-                .chain(UNROWED_DIMENSIONS.iter().copied())
+                .chain(unrowed.iter().copied())
                 .filter(|d| !gated.contains(d))
                 .collect();
             let mut seen = std::collections::HashSet::new();
@@ -639,26 +638,71 @@ mod tests {
         );
     }
 
-    /// The dimensions with no row still reach the report.
+    /// Cost is named ungated only when it was actually measured.
     ///
-    /// Deriving the ungated list purely from emitted rows would satisfy the partition test
-    /// above and still drop cost and duration, which is how they came to be appended by
-    /// hand in the first place.
+    /// The cost footer is omitted entirely for local-only runs — deliberately, so a reader
+    /// is not shown a misleading `$0.0000`. Naming `cost_usd` on the ungated line regardless
+    /// tells that same reader the gate does not cover a number the report never produced.
     #[test]
-    fn unrowed_dimensions_still_reach_the_report() {
-        let rec = sample_result_record();
+    fn cost_is_not_called_measured_when_no_paid_call_ran() {
+        let mut rec = sample_result_record();
+        rec.total_claude_calls = 0;
+        rec.total_cost_usd = None;
+        rec.baseline_cost_usd = None;
+        rec.treatment_cost_usd = None;
+
         let table = render_r_table(&rec);
         let ungated = table
             .lines()
             .find(|l| l.starts_with("UNGATED"))
             .expect("ungated line must render");
+        assert!(
+            !table.contains("Cost ("),
+            "precondition: the cost footer must be absent on a local-only run"
+        );
+        assert!(
+            !ungated.contains("cost_usd"),
+            "no paid call ran, so cost was not measured:\n  {ungated}"
+        );
+    }
 
-        for dim in UNROWED_DIMENSIONS {
-            assert!(
-                ungated.contains(dim),
-                "'{dim}' has no row, so only this list can name it:\n  {ungated}"
-            );
-        }
+    /// The report never names a dimension it does not surface.
+    ///
+    /// `duration_ms` is collected per run in the driver and never aggregated into
+    /// `ResultRecord` or rendered anywhere. Listing it as "measured, never gated" asserts a
+    /// visibility the report does not provide — the reader is told where to look and finds
+    /// nothing. It belongs on this line when it is reported, not before.
+    #[test]
+    fn the_report_names_no_dimension_it_does_not_surface() {
+        let rec = sample_result_record();
+        let table = render_r_table(&rec);
+        assert!(
+            !table.contains("duration"),
+            "duration reaches no output, so the report must not name it:\n{table}"
+        );
+    }
+
+    /// The dimension with no row still reaches the report.
+    ///
+    /// Deriving the ungated list purely from emitted rows would satisfy the partition test
+    /// above and still drop cost, which is how it came to be appended by hand in the first
+    /// place.
+    #[test]
+    fn cost_still_reaches_the_report_when_it_was_measured() {
+        let rec = sample_result_record();
+        assert!(
+            rec.total_claude_calls > 0,
+            "precondition: this fixture must have a paid call for cost to be measured"
+        );
+        let table = render_r_table(&rec);
+        let ungated = table
+            .lines()
+            .find(|l| l.starts_with("UNGATED"))
+            .expect("ungated line must render");
+        assert!(
+            ungated.contains("cost_usd"),
+            "cost has no row, so only this list can name it:\n  {ungated}"
+        );
     }
 
     /// A metric reported ABSENT must not also be reported as measured.

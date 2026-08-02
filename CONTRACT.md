@@ -149,25 +149,31 @@ UNGATED (measured, never gated — a regression in these does NOT fail the run):
   wellformed_pct, pass_at_1, pass_at_2, judge_quality, cost_usd, duration
 ```
 
-`gated` and `ungated` are a **partition**. `gated` is read from the emitted rows;
-`ungated` is every other emitted row plus `UNROWED_DIMENSIONS` (`src/report.rs` —
-`cost_usd` and `duration`, which are measured and reported in the footer but never get a
-row), minus anything gated. Gating a dimension therefore removes it from the ungated list
-in the same step, and no dimension can appear in both.
+`gated` and `ungated` are a **partition** over what *this run actually produced*. `gated`
+is read from the emitted rows; `ungated` is every other emitted row, plus `cost_usd` when a
+paid call ran, minus anything gated. Gating a dimension removes it from the ungated list in
+the same step, so no dimension can appear in both.
 
-Two failure modes are ruled out by construction, and both were shipped before being caught:
+The line says **measured**, never gated. Naming a dimension there asserts this run measured
+it, and three ways of getting that wrong were each shipped before being caught:
 
-- Appending `cost_usd`/`duration` to a row-derived list by hand. Gating either would then
-  have produced a report claiming the gate both covered and did not cover it.
-- Building `ungated` from a static registry of every dimension the harness knows about.
-  This line says **measured**, never gated — so naming a dimension here asserts *this run
-  measured it*. A declared-but-unmeasured metric is reported ABSENT (below), and a static
-  registry listed those as measured two lines above the line calling them unmeasured.
+- **A hand-written tail.** `["cost_usd", "duration"]` appended to a row-derived list. Gating
+  either would have produced a report claiming the gate both covered and did not cover it.
+- **A static registry of every known dimension.** This listed declared-but-unmeasured
+  metrics as measured — two lines above the ABSENT line calling them unmeasured.
+- **Naming a conditionally-measured dimension unconditionally.** The cost footer is omitted
+  on local-only runs by design, since a misleading `$0.0000` is worse than silence. Listing
+  `cost_usd` anyway told the reader the gate does not cover a number the report never
+  produced.
 
-Hence the narrow scope of `UNROWED_DIMENSIONS`: it answers only "what did this run measure
-that has no row", which is a fixed, short list. Everything else is evidence from the run
-itself. The three buckets a declared dimension can land in are **gated**, **ungated**, and
-**ABSENT** — and they do not overlap.
+Hence: everything comes from the run's own output, and the single exception — cost, which
+has no row — is conditioned on the same test the cost footer uses. `duration` is **not**
+listed: the driver times each run, but that never reaches the result record or any output,
+and naming a dimension the report does not surface points a reader at nothing. It belongs
+on the line the day it is reported.
+
+A declared dimension therefore lands in exactly one of three buckets — **gated**,
+**ungated**, or **ABSENT** — and they do not overlap.
 
 A PASS from abproof means "solve-rate did not regress", not "nothing regressed". Read the
 tracked deltas before concluding a change is safe.

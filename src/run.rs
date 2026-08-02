@@ -1608,14 +1608,28 @@ mod tests {
                 row.metric
             );
         }
-        // Cost is measured and reported but is not a row; naming it explicitly is the
-        // difference between "ungated" and "you might reasonably assume it is covered".
+        // Cost has no row, so only the UNGATED list can name it — but this fixture runs
+        // both arms locally, so no paid call happens and cost is NOT measured. It must
+        // therefore be absent here.
+        //
+        // This assertion previously demanded the opposite, and that is what motivated
+        // hardcoding `cost_usd` into the ungated list: a test asserting the report name a
+        // dimension the run never measured. The cost footer is omitted on local-only runs
+        // by design (a misleading `$0.0000` is worse than silence), so the report was being
+        // asked to say the gate does not cover a number it never produced.
+        //
+        // `report::tests::cost_still_reaches_the_report_when_it_was_measured` covers the
+        // case this was reaching for, on a fixture where cost actually is measured.
+        assert_eq!(
+            rec.total_claude_calls, 0,
+            "fixture precondition: both arms local, so no cost is measured"
+        );
         assert!(
-            table
+            !table
                 .lines()
                 .find(|l| l.starts_with("UNGATED"))
                 .is_some_and(|l| l.contains("cost_usd")),
-            "cost is measured but never gated and must be named:\n{table}"
+            "no paid call ran, so cost was not measured and must not be listed:\n{table}"
         );
     }
 
