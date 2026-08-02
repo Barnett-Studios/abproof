@@ -267,15 +267,24 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
             .map(|r| r.metric.as_str())
             .collect();
         if !gated.is_empty() {
-            // Cost has no row, so only this list can name it — but only when a paid call
-            // actually ran. The cost footer is omitted on local-only runs by design, and a
-            // dimension the report does not produce must not be described as measured.
+            // Cost has no row, so only this list can name it — but only when the report
+            // actually produced a cost figure. That takes BOTH conditions: a paid call ran
+            // (the footer is omitted entirely on local-only runs, by design, so a reader is
+            // not shown a misleading `$0.0000`), and the run could price it (any call
+            // reporting `cost_usd=unknown` blanks the cost fields run-wide and degrades the
+            // footer to "Cost: unreported" while the call count stays positive — reachable
+            // on the third cascade rung, whose openai-compat responses carry no cost field).
+            //
+            // Keying on the call count alone let the same report call cost *measured* here
+            // and *unreported* two lines above. That is the `absent_metrics` invariant —
+            // ABSENT must not also be reported as measured — which cost slipped through by
+            // having no row to be absent from.
             //
             // `duration` is deliberately absent. The driver times each run, but that never
             // reaches `ResultRecord` or any output; naming it here would point a reader at
             // a number the report does not contain. It belongs on this line the day it is
             // reported, not before.
-            let unrowed: &[&str] = if rec.total_claude_calls > 0 {
+            let unrowed: &[&str] = if rec.total_claude_calls > 0 && rec.total_cost_usd.is_some() {
                 &["cost_usd"]
             } else {
                 &[]
@@ -949,6 +958,47 @@ mod tests {
         assert!(
             !ungated.contains("cost_usd"),
             "no paid call ran, so cost was not measured:\n  {ungated}"
+        );
+    }
+
+    /// Cost is named ungated only when the run could actually price it.
+    ///
+    /// The sibling above covers `total_claude_calls == 0`. This covers the other way cost
+    /// goes unmeasured while paid calls *did* run: any call that reports `cost_usd=unknown`
+    /// sets a run-wide flag and blanks all three cost fields, so the footer degrades to
+    /// `Cost: unreported` while `total_claude_calls` stays positive.
+    ///
+    /// That is reachable on the documented cascade, not hypothetically: the third rung is an
+    /// external openai-compat router whose responses carry no cost field, so
+    /// `_run_openai_compat` returns `cost_usd=None` while `claude-cli` on the rung above
+    /// reports real money. A single `claude -p` reply with a missing or malformed
+    /// `total_cost_usd` does it too.
+    ///
+    /// Without this, the same report says `cost_usd` was *measured* on the ungated line and
+    /// *unreported* in the footer two lines above — the exact "ABSENT must not also be
+    /// reported as measured" invariant that `absent_metrics` enforces for row metrics, which
+    /// cost slipped through by having no row.
+    #[test]
+    fn cost_is_not_called_measured_when_the_run_could_not_price_it() {
+        let rec = record_with_cost(None, None, None, 3);
+        let table = render_r_table(&rec);
+        assert!(
+            table.contains("Cost: unreported"),
+            "precondition: the report must already know it could not price this run:\n{table}"
+        );
+        let ungated = table
+            .lines()
+            .find(|l| l.starts_with("UNGATED"))
+            .expect("ungated line must render");
+        assert!(
+            !ungated.contains("cost_usd"),
+            "the footer calls cost unreported, so this line must not call it measured:\n  {ungated}"
+        );
+        // Vacuity guard: absence must come from cost being dropped, not from the line
+        // collapsing to nothing and trivially satisfying the assertion above.
+        assert!(
+            ungated.contains("judge_quality"),
+            "the ungated line must still name the dimensions that WERE measured:\n  {ungated}"
         );
     }
 
