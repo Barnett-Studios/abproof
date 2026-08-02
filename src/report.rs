@@ -106,15 +106,28 @@ fn worse_when_higher(metric: &str) -> Option<bool> {
 }
 
 /// Relative change from `baseline` to `treatment`, in the worse direction, as a positive
-/// fraction — or `None` when the move is an improvement, is immaterial, or cannot be
-/// expressed relatively (`baseline == 0`, where every change is infinite).
+/// fraction — or `None` when the move is an improvement or is immaterial.
+///
+/// A **zero baseline** returns `f64::INFINITY` rather than `None` when the move is the wrong
+/// way. There is no relative change to divide by, but the direction is not in doubt, and the
+/// materiality filter must not read "undefined" as "immaterial": the cross-loop experiment
+/// pits a free local baseline against a paid treatment, and `engine_broken_rate`'s *healthy*
+/// baseline is exactly zero — so the two shapes this alarm exists for are both zero-baseline
+/// by construction. The caller words the infinity; it never reaches a `%` format.
 fn ungated_regression(metric: &str, baseline: f64, treatment: f64) -> Option<f64> {
     let higher_is_worse = worse_when_higher(metric)?;
-    if baseline == 0.0 || !baseline.is_finite() || !treatment.is_finite() {
+    if !baseline.is_finite() || !treatment.is_finite() {
         return None;
     }
-    let signed = (treatment - baseline) / baseline.abs();
-    let worse_by = if higher_is_worse { signed } else { -signed };
+    let moved_worse_by = if higher_is_worse {
+        treatment - baseline
+    } else {
+        baseline - treatment
+    };
+    if baseline == 0.0 {
+        return (moved_worse_by > 0.0).then_some(f64::INFINITY);
+    }
+    let worse_by = moved_worse_by / baseline.abs();
     (worse_by >= UNGATED_ALARM_REL).then_some(worse_by)
 }
 
@@ -306,7 +319,14 @@ pub fn render_r_table(rec: &ResultRecord) -> String {
                 regressions.sort_by(|a, b| b.1.total_cmp(&a.1));
                 let named: Vec<String> = regressions
                     .iter()
-                    .map(|(m, by)| format!("{m} {:+.1}%", by * 100.0))
+                    .map(|(m, by)| {
+                        // An unbounded move has no percentage to print — say what happened.
+                        if by.is_finite() {
+                            format!("{m} {:+.1}%", by * 100.0)
+                        } else {
+                            format!("{m} from zero (unbounded)")
+                        }
+                    })
                     .collect();
                 out.push_str(&format!(
                     "UNGATED REGRESSION — moved the wrong way and did not fail the run \
@@ -804,8 +824,80 @@ mod tests {
         assert!(ungated_regression("wellformed_pct", 0.4, 0.9).is_none());
         // Immaterial moves are filtered, in both directions.
         assert!(ungated_regression("cost_usd", 1.0, 1.01).is_none());
-        // A zero baseline has no relative change to report — and must not divide by it.
-        assert!(ungated_regression("cost_usd", 0.0, 5.0).is_none());
+    }
+
+    /// A zero baseline is the loudest regression there is, not an exempt one.
+    ///
+    /// The materiality filter is expressed as a *relative* change, and zero has no relative
+    /// change to divide by — so the first cut of this alarm returned `None` for a zero
+    /// baseline and dropped the move entirely. That silence lands on exactly the shapes the
+    /// alarm exists for: the cross-loop experiment runs a free local baseline against a paid
+    /// treatment (`measurement/experiments/cross-loop-local-vs-claude.yaml`), so a
+    /// $0 -> $1.06 cost regression had a zero baseline by construction; and `engine_broken_rate`
+    /// has a *healthy* baseline of exactly zero, so 0% -> 40% broken was unreportable.
+    ///
+    /// The direction still decides — zero is a floor, and a metric climbing off it is only
+    /// an alarm when climbing is the wrong way.
+    #[test]
+    fn a_regression_off_a_zero_baseline_is_not_silently_dropped() {
+        // Higher-is-worse, off zero: alarm. Both real shapes.
+        assert!(ungated_regression("cost_usd", 0.0, 1.06).is_some());
+        assert!(ungated_regression("engine_broken_rate", 0.0, 0.4).is_some());
+        // Lower-is-worse, off zero: that is an improvement, and must stay silent.
+        assert!(ungated_regression("node_pass_rate", 0.0, 0.5).is_none());
+        // No move at all is no alarm, whichever convention.
+        assert!(ungated_regression("cost_usd", 0.0, 0.0).is_none());
+        assert!(ungated_regression("node_pass_rate", 0.0, 0.0).is_none());
+        // An unknown metric stays inert even here — direction is still the first gate.
+        assert!(ungated_regression("some_future_metric", 0.0, 9.0).is_none());
+    }
+
+    /// The zero-baseline alarm renders as words, not as `+inf%`.
+    ///
+    /// It also sorts ahead of every finite regression: an unbounded move is the worst one
+    /// on the line, and the line is read left to right.
+    #[test]
+    fn a_zero_baseline_regression_renders_and_sorts_first() {
+        let mut rec = sample_result_record();
+        for (metric, baseline, treatment) in [
+            ("engine_broken_rate", 0.0, 0.4),
+            ("wellformed_pct", 1.0, 0.5),
+        ] {
+            rec.rows.push(MetricRow {
+                metric: metric.to_string(),
+                tag: "tracked".to_string(),
+                baseline,
+                treatment,
+                delta: treatment - baseline,
+                w: None,
+                p_two_sided: None,
+                d_z: None,
+                ci_lower: None,
+                ci_upper: None,
+                verdict: None,
+                wilcoxon_method: None,
+                n_nonzero: None,
+            });
+        }
+        let table = render_r_table(&rec);
+        let line = table
+            .lines()
+            .find(|l| l.starts_with("UNGATED REGRESSION"))
+            .expect("a zero-baseline regression must reach the alarm line");
+        assert!(
+            !line.contains("inf"),
+            "an unbounded move must be worded, not printed as a float: {line}"
+        );
+        assert!(
+            line.contains("engine_broken_rate from zero"),
+            "the alarm must name the metric and say it came off zero: {line}"
+        );
+        let broken_at = line.find("engine_broken_rate").expect("named");
+        let wellformed_at = line.find("wellformed_pct").expect("named");
+        assert!(
+            broken_at < wellformed_at,
+            "the unbounded regression must sort ahead of the finite one: {line}"
+        );
     }
 
     /// The alarm is an alarm, not a banner: silent when nothing regressed.
