@@ -25,6 +25,15 @@ declared: `tests/id-guard/vectors.json` is a byte-identical copy of the family's
 adversarial corpus, this guard is judged against it in CI, and the upstream twin's CI diffs the
 copy. A guard that is stricter or laxer than its sibling fails a test rather than a review.
 
+The **statistics** twins are shared the same way, and for a sharper reason.
+`tests/power-guard/vectors.json` is a byte-identical copy of the canonical
+`(n_discordant, alpha) → verdict` corpus; both this crate's minimum-power guard and the
+consumer's in-tree twin are judged against it. `dotclaude measure run` invokes abproof as a
+container and **fails open to that in-tree twin** (ADR-0055), so two implementations that
+disagree mean the fallback silently applies different verdict semantics from the container
+— on the guard whose whole job is refusing to call an unfailable battery a PASS. That path
+is not hypothetical: the framework's only experiment ran on it.
+
 **Refused, never rewritten.** Sanitizing a bad id into a legal one (`a/b` → `a_b`) would be safe
 and dishonest: the run, its temp artifact, and every report derived from them would describe a node
 identity that is not in the corpus. That is the same fail-loud rule as above, applied to input — a

@@ -778,4 +778,107 @@ mod tests {
         assert_eq!(b.name, "cxpak-context-ab");
         assert!((b.gated["node_pass_rate"] - 0.70).abs() < 1e-12);
     }
+
+    // ── one corpus, both statistics twins (dotclaude#56 / #60) ────────────────
+
+    /// Loads the shared power-guard corpus both statistics twins are judged by.
+    ///
+    /// `tests/power-guard/vectors.json` is a **byte-identical** copy of the family's
+    /// canonical corpus (`conformance/corpus/power-guard/vectors.json` in the consumer
+    /// repo). The consumer's `verify-twin-lockstep.py` diffs this copy against the
+    /// canonical one, so weakening a vector here cannot be a quiet local decision —
+    /// exactly the arrangement `tests/id-guard/vectors.json` already has for node ids.
+    ///
+    /// This matters more for the statistics than for the ids. `dotclaude measure run`
+    /// invokes abproof as a ghcr bridge image and **fails open to its linked in-tree twin**
+    /// (ADR-0055), so if the two implementations drift the fallback silently applies
+    /// different verdict semantics from the container — on the guard whose job is refusing
+    /// to report a battery as PASS when it could not have failed. That path is not
+    /// hypothetical: dotclaude#34 ran on it (`transport=fallback reason=exit-125`).
+    fn power_guard_corpus() -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/power-guard/vectors.json"
+        );
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("shared power-guard corpus unreadable at {path}: {e}"));
+        serde_json::from_str(&raw).expect("shared power-guard corpus is not valid JSON")
+    }
+
+    fn corpus_cases<'a>(doc: &'a serde_json::Value, section: &str) -> &'a Vec<serde_json::Value> {
+        doc[section]
+            .as_array()
+            .unwrap_or_else(|| panic!("power-guard corpus has no `{section}` array"))
+    }
+
+    #[test]
+    fn adr0056_the_power_floor_matches_the_shared_corpus() {
+        let doc = power_guard_corpus();
+        let rows = corpus_cases(&doc, "floor");
+        // Vacuity guard: a corpus that shrank to nothing would pass any implementation.
+        assert!(
+            rows.len() >= 10,
+            "shared corpus lost coverage: {} rows",
+            rows.len()
+        );
+
+        for case in rows {
+            let n = case["n_discordant"].as_u64().expect("n_discordant") as usize;
+            let expected = case["min_attainable_p"].as_f64().expect("min_attainable_p");
+            let alpha = case["alpha"].as_f64().expect("alpha");
+            let reachable = case["alpha_reachable"].as_bool().expect("alpha_reachable");
+
+            let actual = crate::stats::min_attainable_p(n);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "min_attainable_p({n}) = {actual}, corpus says {expected}"
+            );
+            assert_eq!(
+                actual <= alpha,
+                reachable,
+                "n={n} alpha={alpha}: corpus says alpha_reachable={reachable}, floor {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn adr0056_the_gate_verdict_matches_the_shared_corpus() {
+        let doc = power_guard_corpus();
+        let rows = corpus_cases(&doc, "verdict");
+        assert!(
+            rows.len() >= 5,
+            "shared corpus lost coverage: {} rows",
+            rows.len()
+        );
+
+        for case in rows {
+            let n = case["n_discordant"].as_u64().expect("n_discordant") as usize;
+            let p = case["p_two_sided"].as_f64().expect("p_two_sided");
+            let worse = case["worse"].as_bool().expect("worse");
+            let alpha = case["alpha"].as_f64().expect("alpha");
+            let expected = case["outcome"].as_str().expect("outcome");
+            let expected_exit = case["exit_code"].as_i64().expect("exit_code") as i32;
+            let label = case["_case"].as_str().unwrap_or("(unlabelled)");
+
+            // baseline arm 0.70, zero tolerance: 0.60 is a worse point estimate, 0.80 better.
+            let observed = if worse { 0.60 } else { 0.80 };
+            let verdicts = gate(
+                &manifest_070_tol0_alpha(alpha),
+                &agg(0.70),
+                &agg(observed),
+                Some(p),
+                Some(n),
+            );
+
+            let actual = serde_json::to_value(verdicts[0].outcome)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .expect("outcome serialises as a string");
+            assert_eq!(
+                actual, expected,
+                "{label}: n={n} p={p} worse={worse} alpha={alpha}"
+            );
+            assert_eq!(exit_code(&verdicts), expected_exit, "{label}: exit code");
+        }
+    }
 }

@@ -1,0 +1,74 @@
+{
+  "_comment": [
+    "Canonical vectors for the minimum-power guard (abproof#3), run through EVERY statistics",
+    "twin in the family so the verdict is a mechanical invariant rather than a review-time",
+    "hope. dotclaude#56.",
+    "",
+    "The guard exists because a battery with too few discordant pairs cannot reach alpha at",
+    "any effect size: the exact two-sided sign-flip test has a hard floor of 2/2^n, since only",
+    "the all-positive and all-negative assignments reach the extreme deviation out of 2^n.",
+    "Reporting such a run as PASS says 'we looked and found no regression' when it means 'we",
+    "could not have found one'.",
+    "",
+    "Consumers (each asserts the same verdict for the same input, in its own CI):",
+    "  - crates/dotclaude-measure/src/{stats,score}.rs   (Rust, this repo — the fail-open path)",
+    "  - abproof/src/{stats,score}.rs                     (Rust, the published component)",
+    "",
+    "Why both must agree: per ADR-0055 `dotclaude measure run` invokes abproof as a ghcr bridge",
+    "image and FAILS OPEN to the linked in-tree twin. If only the published side carries the",
+    "guard, an unavailable container silently degrades the run to the implementation that",
+    "cannot say UNDERPOWERED — fail-open into fail-silent, on the honesty guard itself. That",
+    "is not hypothetical: dotclaude#34 ran entirely on the fallback path",
+    "(transport=fallback reason=exit-125)."
+  ],
+
+  "_floor_note": [
+    "min_attainable_p(n) = 2/2^n for n >= 1, and 1.0 for n == 0 (every pair tied — no signal).",
+    "The operative consequence at alpha=0.05: unreachable at n <= 5, reachable from n = 6.",
+    "",
+    "n is the DISCORDANT-NODE count, never node x rep: each node contributes one delta, the",
+    "mean over its reps. Reps can break ties among the nodes you have (a stochastic node that",
+    "ties at one rep may not at four, and Pratt drops exact zeros) but cannot raise the",
+    "ceiling, which is the battery size."
+  ],
+  "floor": [
+    { "n_discordant": 0,  "min_attainable_p": 1.0,      "alpha": 0.05, "alpha_reachable": false },
+    { "n_discordant": 1,  "min_attainable_p": 1.0,      "alpha": 0.05, "alpha_reachable": false },
+    { "n_discordant": 2,  "min_attainable_p": 0.5,      "alpha": 0.05, "alpha_reachable": false },
+    { "n_discordant": 3,  "min_attainable_p": 0.25,     "alpha": 0.05, "alpha_reachable": false },
+    { "n_discordant": 4,  "min_attainable_p": 0.125,    "alpha": 0.05, "alpha_reachable": false },
+    { "n_discordant": 5,  "min_attainable_p": 0.0625,   "alpha": 0.05, "alpha_reachable": false },
+    { "n_discordant": 6,  "min_attainable_p": 0.03125,  "alpha": 0.05, "alpha_reachable": true },
+    { "n_discordant": 7,  "min_attainable_p": 0.015625, "alpha": 0.05, "alpha_reachable": true },
+    { "n_discordant": 9,  "min_attainable_p": 0.00390625, "alpha": 0.05, "alpha_reachable": true },
+
+    { "_case": "a stricter alpha moves the threshold up, and the twins must move together",
+      "n_discordant": 6,  "min_attainable_p": 0.03125,  "alpha": 0.01, "alpha_reachable": false },
+    { "n_discordant": 8,  "min_attainable_p": 0.0078125, "alpha": 0.01, "alpha_reachable": true },
+
+    { "_case": "a laxer alpha likewise",
+      "n_discordant": 4,  "min_attainable_p": 0.125,    "alpha": 0.20, "alpha_reachable": true },
+    { "n_discordant": 3,  "min_attainable_p": 0.25,     "alpha": 0.20, "alpha_reachable": false }
+  ],
+
+  "_verdict_note": [
+    "outcome = UNDERPOWERED if the floor exceeds alpha, else FAIL if (worse && p < alpha),",
+    "else PASS. The guard is DIRECTION-BLIND on purpose: a battery with no power to detect a",
+    "regression did not establish its absence just because the point estimate improved.",
+    "UNDERPOWERED and a confirmed regression are mutually exclusive by construction."
+  ],
+  "verdict": [
+    { "_case": "the defect this guard fixes — worse, unanimous, still cannot reach alpha",
+      "n_discordant": 5, "p_two_sided": 0.0625, "worse": true,  "alpha": 0.05, "outcome": "UNDERPOWERED", "exit_code": 4 },
+    { "_case": "direction-blind: treatment improved, but the battery still proved nothing",
+      "n_discordant": 3, "p_two_sided": 1.0,    "worse": false, "alpha": 0.05, "outcome": "UNDERPOWERED", "exit_code": 4 },
+    { "_case": "every pair tied — absence of evidence, not evidence of absence",
+      "n_discordant": 0, "p_two_sided": 1.0,    "worse": false, "alpha": 0.05, "outcome": "UNDERPOWERED", "exit_code": 4 },
+    { "_case": "powered and significant — the guard must stand aside",
+      "n_discordant": 6, "p_two_sided": 0.03125, "worse": true,  "alpha": 0.05, "outcome": "FAIL", "exit_code": 1 },
+    { "_case": "powered, worse, but not significant — an honest non-confirmation",
+      "n_discordant": 9, "p_two_sided": 0.5,    "worse": true,  "alpha": 0.05, "outcome": "PASS", "exit_code": 0 },
+    { "_case": "powered and better",
+      "n_discordant": 9, "p_two_sided": 0.0039, "worse": false, "alpha": 0.05, "outcome": "PASS", "exit_code": 0 }
+  ]
+}
