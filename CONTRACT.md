@@ -195,8 +195,17 @@ finite one on the line.
 
 `gated` and `ungated` are a **partition** over what *this run actually produced*. `gated`
 is read from the emitted rows; `ungated` is every other emitted row, plus `cost_usd` when a
-paid call ran, minus anything gated. Gating a dimension removes it from the ungated list in
-the same step, so no dimension can appear in both.
+paid call ran **and the run could price it**, minus anything gated. Gating a dimension
+removes it from the ungated list in the same step, so no dimension can appear in both.
+
+Both cost conditions are load-bearing, and they fail differently. No paid call at all →
+the footer is omitted entirely, so naming `cost_usd` would point at a number the report
+never produced. Paid calls that could not be priced → any call reporting `cost_usd=unknown`
+blanks all three cost fields run-wide while the call count stays positive, degrading the
+footer to `Cost: unreported`; naming `cost_usd` as *measured* there contradicts that footer
+two lines up. This is the same invariant `absent_metrics` enforces for row metrics — ABSENT
+must not also be reported as measured — which cost slipped through by having no row to be
+absent from.
 
 The line says **measured**, never gated. Naming a dimension there asserts this run measured
 it, and three ways of getting that wrong were each shipped before being caught:
