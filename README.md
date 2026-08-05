@@ -5,6 +5,9 @@
 [![Downloads](https://img.shields.io/crates/d/abproof)](https://crates.io/crates/abproof)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
+**Oracle / evidence plane · Stable** — feature-complete; maintenance only. The scope is finished,
+not abandoned. See the [component map](https://github.com/Barnett-Studios) for how this fits the rest.
+
 **Offline A/B change-validation for an agentic coding harness — stat-gated, seed-blocked,
 reusing the executor as the arm.**
 
