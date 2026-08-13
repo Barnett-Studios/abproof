@@ -29,7 +29,9 @@ fn run(args: &[&str]) -> Output {
 }
 
 fn code(out: &Output) -> i32 {
-    out.status.code().expect("no case here is killed by a signal")
+    out.status
+        .code()
+        .expect("no case here is killed by a signal")
 }
 
 fn stdout(out: &Output) -> String {
