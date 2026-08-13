@@ -14,18 +14,26 @@ const USAGE: &str = "usage: abproof run <manifest.yaml> \
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // `run-json`: the ADR-0052 response-envelope surface consumed by `dotclaude measure`
-    // via ComponentInvoker. Reads a request envelope on stdin, runs (or projects) the
-    // experiment, writes a `{schema_version, status, body}` envelope on stdout, exits 0 —
-    // the decision (and any abort) is carried in the envelope, never the exit code.
-    if args.len() >= 2 && args[1] == "run-json" {
-        std::process::exit(run_json_cli());
-    }
-
-    // Bare `abproof` or unknown subcommand → usage, exit 0.
-    if args.len() < 2 || args[1] != "run" {
-        println!("{USAGE}");
-        std::process::exit(0);
+    match args.get(1).map(String::as_str) {
+        // `run-json`: the ADR-0052 response-envelope surface consumed by `dotclaude measure`
+        // via ComponentInvoker. Reads a request envelope on stdin, runs (or projects) the
+        // experiment, writes a `{schema_version, status, body}` envelope on stdout, exits 0 —
+        // the decision (and any abort) is carried in the envelope, never the exit code.
+        Some("run-json") => std::process::exit(run_json_cli()),
+        Some("run") => {}
+        // A misspelt, renamed, or stale subcommand used to print usage and exit **0** — and
+        // here 0 is not a friendly no-op, it is the code CONTRACT.md assigns to a passing
+        // gate. `abproof "$CMD" m.yaml --confirm && echo passed` printed `passed` having
+        // measured nothing. 64 is what `run` with a missing manifest already returns; a
+        // usage error is a usage error whichever token is wrong (#21).
+        Some(other) => die64(&format!("unknown subcommand '{other}'")),
+        // Bare `abproof` keeps the friendly-help idiom: usage on stdout, exit 0. Nobody
+        // scripts a no-argument invocation and reads $?, so this one cannot be mistaken
+        // for a verdict.
+        None => {
+            println!("{USAGE}");
+            std::process::exit(0);
+        }
     }
 
     let mut dry_run = false;
