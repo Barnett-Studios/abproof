@@ -13,6 +13,13 @@ reconstructed from memory.
 
 ### Changed — BREAKING
 
+- **An unrecognised subcommand exits `64` (usage) instead of `0`, and prints its diagnostic
+  to stderr instead of stdout.** `0` is this tool's PASS code, so `abproof "$CMD" m.yaml
+  --confirm && echo passed` printed `passed` whenever `$CMD` was stale, renamed, or
+  misspelt — having measured nothing. A bare `abproof` with no arguments still prints usage
+  on stdout and exits `0`; that one cannot be read as a verdict. `run-json` is untouched —
+  ADR-0052 deliberately carries the decision in the envelope. (#21)
+
 - **An underpowered battery reports `UNDERPOWERED` and exits `4`, where it previously
   exited `0`/PASS.** The exact two-sided sign-flip test has a hard floor of `2/2ⁿ` on `n`
   discordant pairs, so α = 0.05 is unreachable at `n ≤ 5`. A run under that threshold could

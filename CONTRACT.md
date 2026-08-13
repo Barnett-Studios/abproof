@@ -52,6 +52,10 @@ abproof run <manifest.yaml> [--dry-run | --confirm] [--out <path>] [--max-cost <
   projection exceeds the cap; `--max-cost` aborts mid-battery (exit 3) rather than overspending.
 - Exit: `0` pass · `1` setup error · `3` aborted · `4` underpowered (alpha unreachable — **not** a
   pass) · `64` usage · otherwise the gate's own code.
+- An **unrecognised subcommand** is a usage error: diagnostic and usage on stderr, exit `64`. It is
+  not a friendly no-op, because `0` here is a *verdict* — a wrapper invoking a stale or misspelt
+  subcommand must not read PASS off a run that never happened. A **bare** `abproof` with no
+  arguments keeps the help idiom (usage on stdout, exit `0`); nobody scripts that and reads `$?`.
 
 Run-time inputs are resolved by env (`ABPROOF_CORPUS`, `ABPROOF_EXECUTE_NODE`, `ABPROOF_RESULTS`),
 each falling back to a walk-up from the CWD so it works inside a checkout without configuration.
