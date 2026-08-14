@@ -5,11 +5,26 @@ All notable changes to `abproof` are recorded here. Format follows
 [SemVer](https://semver.org/), read under cargo's 0.x rule where the **minor** is the
 breaking position (`0.2` and `0.3` are incompatible ranges).
 
-This file starts at 0.3.0. Earlier releases are recoverable from the git history
+This file starts at 0.4.0. Earlier releases are recoverable from the git history
 (`git log --oneline --grep '^release:'`) and are not back-filled here rather than
 reconstructed from memory.
 
-## [0.3.0] — unreleased
+It briefly started at 0.3.0, with the entries below sitting under a `## [0.3.0] —
+unreleased` heading while 0.3.0 was on crates.io — so four entries, two of them breaking,
+described behaviour the published artifact does not have, and the `— unreleased` marker
+shipped inside the `v0.3.0` tag. They were always unreleased work, and under cargo's 0.x
+rule stated above a breaking change is the minor position, so they belong to 0.4.0 (#23).
+0.3.0 itself has no section here, which is the same policy as every release before it.
+
+## [0.4.0] — unreleased
+
+### Fixed
+
+- `abproof --help` (and `-h`) prints usage and exits `0` again. The unrecognised-subcommand
+  change below caught it, and `brew test abproof` runs exactly that — the Homebrew formula
+  this repo generates asserts `abproof --help` succeeds, so the tap's test would have failed
+  on the next release. `--version` deliberately still exits `64`: it is a real query this
+  binary does not answer, and saying so is not the same as refusing a request for help. (#23)
 
 ### Changed — BREAKING
 

@@ -21,6 +21,16 @@ fn main() {
         // the decision (and any abort) is carried in the envelope, never the exit code.
         Some("run-json") => std::process::exit(run_json_cli()),
         Some("run") => {}
+        // `--help` asks for the usage text; answering a request for help with EX_USAGE is
+        // hostile and, concretely, broke `brew test abproof` — the Homebrew formula this
+        // repo generates runs `abproof --help` and asserts success. Same reasoning as the
+        // bare invocation below: nobody scripts a help request and reads $? expecting a
+        // gate verdict. `--version` is NOT in here — it is a real query this binary does
+        // not answer, and 64 is the honest reply to that (#23).
+        Some("--help") | Some("-h") => {
+            println!("{USAGE}");
+            std::process::exit(0);
+        }
         // A misspelt, renamed, or stale subcommand used to print usage and exit **0** — and
         // here 0 is not a friendly no-op, it is the code CONTRACT.md assigns to a passing
         // gate. `abproof "$CMD" m.yaml --confirm && echo passed` printed `passed` having

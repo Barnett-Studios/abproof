@@ -80,6 +80,30 @@ jobs:
     permissions:
       contents: write   # create the GitHub Release
     steps:
+      - uses: actions/checkout@v4
+      # The tag's own content is what ships and what `git show v0.3.0:CHANGELOG.md`
+      # returns forever after. v0.3.0 shipped `## [0.3.0] — unreleased` inside itself, so
+      # the published changelog described the release as not existing while four entries
+      # under that heading described behaviour it did not have (#23).
+      #
+      # Checked HERE rather than in CI because "unreleased" is the correct state on every
+      # commit until the one that gets tagged. Failing the release is the point: the tag is
+      # already immutable, so the only fix is to delete it, stamp the date, and re-tag —
+      # which is far cheaper than a permanently wrong published changelog.
+      - name: the changelog does not call this release unreleased
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          heading="$(grep -m1 -E "^## \\[${VERSION}\\]" CHANGELOG.md || true)"
+          if [ -z "$heading" ]; then
+            echo "::error::CHANGELOG.md has no '## [${VERSION}]' section — this release is undocumented"
+            exit 1
+          fi
+          case "$heading" in
+            *unreleased*|*Unreleased*|*UNRELEASED*)
+              echo "::error::$heading — stamp the release date before tagging; this text is inside the tag and cannot be corrected later"
+              exit 1 ;;
+          esac
+          echo "$heading"
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:

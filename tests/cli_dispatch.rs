@@ -66,6 +66,27 @@ fn an_unknown_subcommand_is_a_usage_error_on_stderr() {
 }
 
 #[test]
+fn asking_for_help_is_answered_with_help() {
+    // Regression: `--help` fell into the unknown-subcommand arm and exited 64. The
+    // Homebrew formula this repo generates runs `abproof --help` in its `test do` block,
+    // so `brew test abproof` would have failed on the next release (#23).
+    for flag in ["--help", "-h"] {
+        let out = run(&[flag]);
+        assert_eq!(code(&out), 0, "`abproof {flag}` must answer, not refuse");
+        assert!(
+            stdout(&out).contains("usage: abproof run"),
+            "`abproof {flag}` must print usage on stdout, got {:?}",
+            stdout(&out)
+        );
+    }
+
+    // `--version` stays a usage error, and that is not an oversight: it is a real query
+    // this binary does not answer. Refusing it is honest; answering a request for HELP
+    // with EX_USAGE is not.
+    assert_eq!(code(&run(&["--version"])), 64);
+}
+
+#[test]
 fn a_bare_invocation_keeps_the_friendly_help_idiom() {
     let out = run(&[]);
     assert_eq!(
