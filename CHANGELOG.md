@@ -28,6 +28,14 @@ rule stated above a breaking change is the minor position, so they belong to 0.4
 
 ### Changed — BREAKING
 
+- **`--dry-run` exits `1` on a battery containing a node a run would refuse, where it
+  previously exited `0` with a projection.** The pre-flight already loads every node to count
+  `loop_runs`; it now applies the same `node.id` and `meta.files` rules `driver` and `worktree`
+  apply, so a curation defect surfaces before anything is spent instead of when a paid run
+  reaches the offending node. Listed as breaking on the same reasoning as the subcommand change
+  below: a wrapper that dry-runs and reads `$?` sees `1` where it saw `0`. The predicates are
+  shared, not copied, so a node refused at load and one refused at run cannot disagree. (#25)
+
 - **An unrecognised subcommand exits `64` (usage) instead of `0`, and prints its diagnostic
   to stderr instead of stdout.** `0` is this tool's PASS code, so `abproof "$CMD" m.yaml
   --confirm && echo passed` printed `passed` whenever `$CMD` was stale, renamed, or

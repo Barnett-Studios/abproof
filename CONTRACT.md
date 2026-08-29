@@ -47,7 +47,13 @@ abproof run <manifest.yaml> [--dry-run | --confirm] [--out <path>] [--max-cost <
 
 - Without `--confirm`: prints the dry-run projection (loop-runs, judge-calls, minutes, projected
   claude-cli calls) and exits 0 — nothing is spent.
-- `--dry-run`: projection only, exit 0.
+- `--dry-run`: projection only, exit 0 — **once the battery loads**. Loading applies the same
+  `node.id` and `meta.files` rules a run applies, so a corpus node a run would refuse is a setup
+  error (exit `1`) naming the node, not a tidy projection over work that cannot happen (#25).
+  The dry-run already loads every node to count `loop_runs`, so this costs no extra I/O; and a
+  projection over a node no run can execute is a false *plan*, which is the same failure this
+  document rejects two sections up when it calls a malformed entry "a curation defect to
+  surface, not to paper over".
 - `--confirm`: runs the seed-blocked A/B; `--max-calls` pre-flight-refuses (exit 64) if the
   projection exceeds the cap; `--max-cost` aborts mid-battery (exit 3) rather than overspending.
 - Exit: `0` pass · `1` setup error · `3` aborted · `4` underpowered (alpha unreachable — **not** a
