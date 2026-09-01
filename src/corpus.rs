@@ -118,6 +118,19 @@ pub fn load_node(dir: &Path) -> Result<CorpusNode, CorpusError> {
         CorpusError::Meta(node_id, e.to_string())
     })?;
 
+    // abproof#25 — apply the run-time rules while the nodes are in hand. `--dry-run` is the
+    // pre-flight: it already loads every node to count `loop_runs`, so validating here costs
+    // no extra I/O and turns a curation defect from something a paid run discovers at the
+    // offending node into a setup error before anything is spent. Both predicates are the
+    // ones `driver` and `worktree` enforce, called rather than copied, so a node refused at
+    // load and a node refused at run cannot disagree about the rule.
+    crate::driver::validate_node_id(&meta.id).map_err(|e| CorpusError::Meta(meta.id.clone(), e))?;
+    for rel in &meta.files {
+        crate::worktree::validate_materialize_path(rel).map_err(|e| {
+            CorpusError::Meta(meta.id.clone(), format!("meta.files entry rejected: {e}"))
+        })?;
+    }
+
     let seed_dir = dir.join("seed");
     let seed = if seed_dir.is_dir() {
         let mut files = Vec::new();

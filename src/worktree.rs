@@ -38,6 +38,25 @@ pub struct NodeWorkspace {
     root: PathBuf,
 }
 
+/// The materialize-path rule, as one predicate.
+///
+/// Extracted (abproof#25) so the battery loader can apply the *same* rule to `meta.files`
+/// at load time rather than carrying a second copy of it. Reject absolute paths and any
+/// `..` component before joining onto root.
+pub fn validate_materialize_path(rel: &str) -> Result<(), String> {
+    let rel_path = std::path::Path::new(rel);
+    if rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "unsafe materialize path '{rel}' (absolute or contains '..') — refused"
+        ));
+    }
+    Ok(())
+}
+
 impl NodeWorkspace {
     /// Materialize `spec` into a fresh temp git repo with a single clean commit.
     ///
@@ -100,16 +119,7 @@ impl NodeWorkspace {
         // Defense-in-depth: MaterializeSpec::files is a public field, so an external
         // caller of this library crate could hand us a path that escapes the work tree.
         // Reject absolute paths and any `..` component before joining onto root.
-        let rel_path = std::path::Path::new(rel);
-        if rel_path.is_absolute()
-            || rel_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(WorktreeError::Io(format!(
-                "unsafe materialize path '{rel}' (absolute or contains '..') — refused"
-            )));
-        }
+        validate_materialize_path(rel).map_err(WorktreeError::Io)?;
         let target = self.root.join(rel);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)

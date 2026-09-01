@@ -123,13 +123,12 @@ pub enum DriverError {
     #[error("{0}")]
     Io(String),
     /// A corpus-authored `node.id` that is not a slug. Refused, never rewritten
-    /// — see [`temp_node_path`].
+    /// — see [`validate_node_id`].
     #[error("{0}")]
     InvalidNode(String),
 }
 
-/// Temp path for a node's serialized JSON, with the corpus-authored `node.id`
-/// **validated rather than sanitized**.
+/// The corpus-authored `node.id` rule, as one predicate: **validated, never sanitized**.
 ///
 /// `node.id` comes from corpus `meta.yaml` — the same producer whose `meta.files`
 /// `worktree.rs` already treats as untrusted. This is the RC-1 trust boundary
@@ -151,9 +150,10 @@ pub enum DriverError {
 /// `tests/id-guard/vectors.json` here, byte-identical upstream — so the next divergence
 /// fails a test instead of waiting for a port to notice it.
 ///
-/// Extraction is part of the fix: the path used to be built inline inside
-/// `LocalNodeDriver::run`, where no test could reach it.
-fn temp_node_path(node_id: &str, counter: u64) -> Result<PathBuf, DriverError> {
+/// Extracted (abproof#25) so the battery loader can apply the *same* rule while the nodes
+/// are in hand, instead of a second copy of it. A curation defect found at load costs
+/// nothing; found here, it costs every node the run already paid for.
+pub fn validate_node_id(node_id: &str) -> Result<(), String> {
     // `chars().count()`, not `len()`: the Python producer's `len()` counts characters, and
     // a twin pair that disagrees about what "100" measures is drift waiting to happen.
     // Every non-ASCII id is rejected by the charset clause regardless, so this changes no
@@ -167,12 +167,22 @@ fn temp_node_path(node_id: &str, counter: u64) -> Result<PathBuf, DriverError> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
     if !legal {
-        return Err(DriverError::InvalidNode(format!(
+        return Err(format!(
             "corpus node.id {node_id:?} is not a slug ([A-Za-z0-9][A-Za-z0-9._-]*, at most \
              {ID_MAX_LEN} characters) — refused rather than rewritten, which would run the \
              node under an identity that is not in the corpus"
-        )));
+        ));
     }
+    Ok(())
+}
+
+/// Temp path for a node's serialized JSON, with the `node.id` validated by
+/// [`validate_node_id`] before it reaches the filename.
+///
+/// Extraction is part of the fix: the path used to be built inline inside
+/// `LocalNodeDriver::run`, where no test could reach it.
+fn temp_node_path(node_id: &str, counter: u64) -> Result<PathBuf, DriverError> {
+    validate_node_id(node_id).map_err(DriverError::InvalidNode)?;
     // Counter first, so the constant `abproof-node-{counter}-` prefix owns the whole
     // first path component. Defence in depth behind the check above, not a substitute
     // for it: with the id first (as it was), a separator in `node_id` split the prefix
