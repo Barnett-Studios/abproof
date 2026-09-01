@@ -123,13 +123,12 @@ pub enum DriverError {
     #[error("{0}")]
     Io(String),
     /// A corpus-authored `node.id` that is not a slug. Refused, never rewritten
-    /// — see [`temp_node_path`].
+    /// — see [`validate_node_id`].
     #[error("{0}")]
     InvalidNode(String),
 }
 
-/// Temp path for a node's serialized JSON, with the corpus-authored `node.id`
-/// **validated rather than sanitized**.
+/// The corpus-authored `node.id` rule, as one predicate: **validated, never sanitized**.
 ///
 /// `node.id` comes from corpus `meta.yaml` — the same producer whose `meta.files`
 /// `worktree.rs` already treats as untrusted. This is the RC-1 trust boundary
@@ -150,10 +149,6 @@ pub enum DriverError {
 /// lockstep with this. Both sides are now judged against the same corpus —
 /// `tests/id-guard/vectors.json` here, byte-identical upstream — so the next divergence
 /// fails a test instead of waiting for a port to notice it.
-///
-/// Extraction is part of the fix: the path used to be built inline inside
-/// `LocalNodeDriver::run`, where no test could reach it.
-/// The corpus-authored `node.id` rule, as one predicate.
 ///
 /// Extracted (abproof#25) so the battery loader can apply the *same* rule while the nodes
 /// are in hand, instead of a second copy of it. A curation defect found at load costs
@@ -181,11 +176,12 @@ pub fn validate_node_id(node_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Temp path for a node's serialized JSON, with the `node.id` validated by
+/// [`validate_node_id`] before it reaches the filename.
+///
+/// Extraction is part of the fix: the path used to be built inline inside
+/// `LocalNodeDriver::run`, where no test could reach it.
 fn temp_node_path(node_id: &str, counter: u64) -> Result<PathBuf, DriverError> {
-    // `chars().count()`, not `len()`: the Python producer's `len()` counts characters, and
-    // a twin pair that disagrees about what "100" measures is drift waiting to happen.
-    // Every non-ASCII id is rejected by the charset clause regardless, so this changes no
-    // verdict today — it keeps the implementations saying the same thing.
     validate_node_id(node_id).map_err(DriverError::InvalidNode)?;
     // Counter first, so the constant `abproof-node-{counter}-` prefix owns the whole
     // first path component. Defence in depth behind the check above, not a substitute
