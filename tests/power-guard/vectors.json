@@ -2,7 +2,7 @@
   "_comment": [
     "Canonical vectors for the minimum-power guard (abproof#3), run through EVERY statistics",
     "twin in the family so the verdict is a mechanical invariant rather than a review-time",
-    "hope. dotclaude#56.",
+    "hope. conductr#56.",
     "",
     "The guard exists because a battery with too few discordant pairs cannot reach alpha at",
     "any effect size: the exact two-sided sign-flip test has a hard floor of 2/2^n, since only",
@@ -11,14 +11,14 @@
     "could not have found one'.",
     "",
     "Consumers (each asserts the same verdict for the same input, in its own CI):",
-    "  - crates/dotclaude-measure/src/{stats,score}.rs   (Rust, this repo — the fail-open path)",
+    "  - crates/conductr-measure/src/{stats,score}.rs   (Rust, this repo — the fail-open path)",
     "  - abproof/src/{stats,score}.rs                     (Rust, the published component)",
     "",
-    "Why both must agree: per ADR-0055 `dotclaude measure run` invokes abproof as a ghcr bridge",
+    "Why both must agree: per ADR-0055 `conductr measure run` invokes abproof as a ghcr bridge",
     "image and FAILS OPEN to the linked in-tree twin. If only the published side carries the",
     "guard, an unavailable container silently degrades the run to the implementation that",
     "cannot say UNDERPOWERED — fail-open into fail-silent, on the honesty guard itself. That",
-    "is not hypothetical: dotclaude#34 ran entirely on the fallback path",
+    "is not hypothetical: conductr#34 ran entirely on the fallback path",
     "(transport=fallback reason=exit-125)."
   ],
 
