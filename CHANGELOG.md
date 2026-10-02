@@ -59,6 +59,15 @@ rule stated above a breaking change is the minor position, so they belong to 0.4
 - `WilcoxonResult` gains `min_attainable_p`; `score::gate` gains an `n_nonzero` parameter.
   Both break external callers at compile time.
 
+- **`CorpusNode::seed` and `worktree::MaterializeSpec::files` change element type**, from
+  `Vec<(String, String)>` to `Vec<worktree::SeedFile>` (`{path, content: Vec<u8>, executable:
+  bool}`). 47 of 250 real corpus nodes — every Exercism java node, which ships a Gradle
+  wrapper jar — could not be loaded at all: the old `String`-typed seed could not represent a
+  binary asset, and `read_to_string` hard-failed on one. Seed content is bytes end to end now,
+  and a seed file's executable bit (`gradlew` is `0755` in the corpus) survives materialization,
+  where `fs::write` previously left every file at the umask default. Breaks any external caller
+  matching on the old tuple shape at compile time. (#32)
+
 ### Added
 
 - `score::GateOutcome`, `score::EXIT_UNDERPOWERED`, `stats::min_attainable_p`.
