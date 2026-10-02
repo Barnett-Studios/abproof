@@ -13,15 +13,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static WT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// One file in a node's RED seed project: its path relative to the work-tree root,
+/// its raw bytes (abproof#32 — a seed may carry a non-UTF-8 asset, e.g. a Gradle
+/// wrapper jar, so content is never decoded as text on this path), and whether the
+/// source file on disk carried the executable bit (abproof#32's second wall —
+/// `gradlew` must stay `0755` or the materialized tree cannot even spawn it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeedFile {
+    pub path: String,
+    pub content: Vec<u8>,
+    pub executable: bool,
+}
+
 /// The complete RED project to materialize into a node's work tree: every seed
-/// file by relative path — the stub source(s) the model must fix, the acceptance
-/// test(s), and any scaffold (`Cargo.toml`, `go.mod`, `src/` layout). Carried
-/// in-memory on [`crate::corpus::NodeJson`] (`#[serde(skip)]`) — never part of the
-/// JSON contract `execute_node.py` reads.
+/// file — the stub source(s) the model must fix, the acceptance test(s), and any
+/// scaffold (`Cargo.toml`, `go.mod`, `src/` layout). Carried in-memory on
+/// [`crate::corpus::NodeJson`] (`#[serde(skip)]`) — never part of the JSON
+/// contract `execute_node.py` reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaterializeSpec {
-    /// `(relative path, content)` for every file in the seed project.
-    pub files: Vec<(String, String)>,
+    pub files: Vec<SeedFile>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -109,24 +120,29 @@ impl NodeWorkspace {
     }
 
     fn write_files(&self, spec: &MaterializeSpec) -> Result<(), WorktreeError> {
-        for (rel, content) in &spec.files {
-            self.write_one(rel, content)?;
+        for file in &spec.files {
+            self.write_one(file)?;
         }
         Ok(())
     }
 
-    fn write_one(&self, rel: &str, content: &str) -> Result<(), WorktreeError> {
+    fn write_one(&self, file: &SeedFile) -> Result<(), WorktreeError> {
         // Defense-in-depth: MaterializeSpec::files is a public field, so an external
         // caller of this library crate could hand us a path that escapes the work tree.
         // Reject absolute paths and any `..` component before joining onto root.
-        validate_materialize_path(rel).map_err(WorktreeError::Io)?;
-        let target = self.root.join(rel);
+        validate_materialize_path(&file.path).map_err(WorktreeError::Io)?;
+        let target = self.root.join(&file.path);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| WorktreeError::Io(format!("mkdir {}: {e}", parent.display())))?;
         }
-        std::fs::write(&target, content)
-            .map_err(|e| WorktreeError::Io(format!("write {}: {e}", target.display())))
+        std::fs::write(&target, &file.content)
+            .map_err(|e| WorktreeError::Io(format!("write {}: {e}", target.display())))?;
+        if file.executable {
+            set_executable(&target)
+                .map_err(|e| WorktreeError::Io(format!("chmod {}: {e}", target.display())))?;
+        }
+        Ok(())
     }
 
     fn commit_baseline(&self) -> Result<(), WorktreeError> {
@@ -160,20 +176,46 @@ impl Drop for NodeWorkspace {
     }
 }
 
+/// Set the owner/group/world executable bits (0o755) on a just-written file.
+/// Unix only — the supported platform is macOS (Linux/Windows are roadmap); on any
+/// other target this is a no-op, matching `std::fs::write`'s own mode-default
+/// behavior there, rather than failing a materialize over a bit the target
+/// platform cannot run a shell script on regardless.
+#[cfg(unix)]
+fn set_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn seed_file(path: &str, content: &str, executable: bool) -> SeedFile {
+        SeedFile {
+            path: path.into(),
+            content: content.as_bytes().to_vec(),
+            executable,
+        }
+    }
+
     fn spec() -> MaterializeSpec {
         MaterializeSpec {
             files: vec![
-                (
-                    "calc.py".into(),
-                    "def add(a, b):\n    raise NotImplementedError\n".into(),
+                seed_file(
+                    "calc.py",
+                    "def add(a, b):\n    raise NotImplementedError\n",
+                    false,
                 ),
-                (
-                    "acceptance_test.py".into(),
-                    "from calc import add\nassert add(2, 3) == 5\n".into(),
+                seed_file(
+                    "acceptance_test.py",
+                    "from calc import add\nassert add(2, 3) == 5\n",
+                    false,
                 ),
             ],
         }
@@ -217,8 +259,8 @@ mod tests {
     fn create_writes_nested_paths() {
         let s = MaterializeSpec {
             files: vec![
-                ("pkg/mod.py".into(), "x = 1\n".into()),
-                ("acceptance_test.py".into(), "print('ok')\n".into()),
+                seed_file("pkg/mod.py", "x = 1\n", false),
+                seed_file("acceptance_test.py", "print('ok')\n", false),
             ],
         };
         let ws = NodeWorkspace::create(&s).expect("materialize nested");
@@ -229,12 +271,45 @@ mod tests {
     }
 
     #[test]
+    fn create_writes_executable_bit_when_seed_file_marks_it() {
+        // abproof#32 second wall: fs::write leaves a file at the umask default (no exec
+        // bit). A seed file that was 0755 on disk (e.g. gradlew) must materialize 0755,
+        // or the node's `accept` command cannot even spawn it.
+        use std::os::unix::fs::PermissionsExt;
+        let s = MaterializeSpec {
+            files: vec![
+                seed_file("run.sh", "#!/bin/sh\necho ok\n", true),
+                seed_file("acceptance_test.py", "print('ok')\n", false),
+            ],
+        };
+        let ws = NodeWorkspace::create(&s).expect("materialize executable");
+        let mode = std::fs::metadata(ws.root().join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "run.sh must carry the executable bit, got mode {mode:o}"
+        );
+        let other_mode = std::fs::metadata(ws.root().join("acceptance_test.py"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            other_mode & 0o111,
+            0,
+            "a non-executable seed file must not gain the exec bit, got mode {other_mode:o}"
+        );
+    }
+
+    #[test]
     fn create_rejects_path_traversal_in_materialize_spec() {
         // MaterializeSpec::files is public; a `..` component must be refused, not written
         // outside the work tree.
         for bad in ["../escape.py", "pkg/../../escape.py", "/abs/escape.py"] {
             let s = MaterializeSpec {
-                files: vec![(bad.into(), "x = 1\n".into())],
+                files: vec![seed_file(bad, "x = 1\n", false)],
             };
             let err = NodeWorkspace::create(&s)
                 .err()
