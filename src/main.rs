@@ -196,6 +196,13 @@ struct RunRequest {
     /// Project only (no arms executed) — needs no baseline, driver, or network.
     #[serde(default)]
     dry_run: bool,
+    /// Opt-in to execution, mirroring the CLI's `--confirm`. abproof#27: without this
+    /// field a request that omitted `dry_run` reached the execute branch with no opt-in
+    /// at all — the CLI's "neither flag" default (project, spend nothing) had no
+    /// run-json equivalent. `dry_run` still wins over `confirm` if both are set, same
+    /// as the CLI checks `--dry-run` before `--confirm`.
+    #[serde(default)]
+    confirm: bool,
     #[serde(default)]
     max_cost: Option<f64>,
     #[serde(default)]
@@ -203,23 +210,31 @@ struct RunRequest {
 }
 
 /// Read a request envelope from stdin, evaluate, print the response envelope. Returns the
-/// process exit code — always 0 on a well-formed request (the decision is in the body); 1 only
-/// on an unreadable stdin or a malformed request, so a broken call is never a false clean pass.
+/// process exit code — **always 0** (abproof#27). The decision, and any abort or setup fault,
+/// is carried entirely in the envelope's `status` field (ADR-0052) so a consumer never reads
+/// `$?` to know whether to fall open; this matches the dispatch-site comment ("never the exit
+/// code") and the README, which agreed with each other and not with this function's old doc
+/// comment or its code — both of which exited 1 on every `Err`, including a merely malformed
+/// manifest inside a perfectly well-formed request.
 fn run_json_cli() -> i32 {
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
-        println!("{}", error_envelope(&format!("failed to read stdin: {e}")));
-        return 1;
+        let (out, code) = respond(Err(format!("failed to read stdin: {e}")));
+        println!("{out}");
+        return code;
     }
-    match run_json(&input) {
-        Ok(out) => {
-            println!("{out}");
-            0
-        }
-        Err(e) => {
-            println!("{}", error_envelope(&e));
-            1
-        }
+    let (out, code) = respond(run_json(&input));
+    println!("{out}");
+    code
+}
+
+/// Turn a `run_json` result into the printed envelope and the process exit code. Exit is
+/// always 0 (abproof#27) — isolated from stdin I/O so the exit-code contract itself is
+/// unit-testable without a real stdin.
+fn respond(result: Result<String, String>) -> (String, i32) {
+    match result {
+        Ok(out) => (out, 0),
+        Err(e) => (error_envelope(&e), 0),
     }
 }
 
@@ -244,8 +259,11 @@ fn run_json(input: &str) -> Result<String, String> {
     };
     let dry = abproof::run::project(&manifest, judged_tasks, manifest.reps);
 
-    // Dry-run: project only — needs no baseline, driver, or network.
-    if req.dry_run {
+    // Project only — needs no baseline, driver, or network. Three states, matching the
+    // CLI: `dry_run: true` projects explicitly; omitting `confirm` also projects (the
+    // default that spends nothing, abproof#27); only `confirm: true` (with `dry_run` not
+    // set) reaches execution below.
+    if req.dry_run || !req.confirm {
         let body = serde_json::to_value(&dry).map_err(|e| format!("encode projection: {e}"))?;
         return Ok(ok_envelope(
             serde_json::json!({ "mode": "dry_run", "projection": body }),
@@ -401,6 +419,70 @@ gate_alpha: 0.10
     fn manifest_parse_error_is_reported() {
         let req = serde_json::json!({ "manifest_yaml": "::: not a manifest :::" }).to_string();
         assert!(run_json(&req).is_err());
+    }
+
+    #[test]
+    fn exit_code_is_always_zero_even_on_every_error_class() {
+        // abproof#27: three statements already agreed exit is always 0 (the README, and
+        // the dispatch-site comment's "never the exit code") — the function's own doc
+        // comment and the code were the outliers. Exercise every error class the issue
+        // measured and confirm the code, not just the two reader-facing docs.
+        let cases: Vec<(String, i32)> = vec![
+            respond(Err("manifest parse error: bogus".to_string())),
+            respond(Err(
+                "baseline_json is required for a confirmed run".to_string()
+            )),
+            respond(run_json("not json")),
+            respond(run_json("{}")),
+        ];
+        for (out, code) in cases {
+            assert_eq!(code, 0, "every error class must still exit 0; body={out}");
+            let v: serde_json::Value = serde_json::from_str(&out).expect("envelope is JSON");
+            assert_eq!(v["status"], "error");
+        }
+    }
+
+    #[test]
+    fn omitting_confirm_and_dry_run_only_projects_nothing_is_spent() {
+        // abproof#27 part 2: the CLI's three states are --dry-run / --confirm / neither,
+        // and the default (neither) spends nothing. run-json had only two states and
+        // defaulted to the *other* one — a request that omits `dry_run` reached the
+        // execute branch with no opt-in of any kind. `confirm` is now required to
+        // execute; omitting both must project, exactly like `dry_run: true` does.
+        std::env::set_var(
+            "ABPROOF_CORPUS",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/corpus-fixture/red-baseline"),
+        );
+        let req = serde_json::json!({ "manifest_yaml": MANIFEST }).to_string();
+        let out = run_json(&req).expect("omitting confirm must project, not require a baseline");
+        std::env::remove_var("ABPROOF_CORPUS");
+
+        let v = body_of(&out);
+        assert_eq!(v["status"], "ok");
+        assert_eq!(
+            v["body"]["mode"], "dry_run",
+            "omitting confirm must behave like dry_run: true — nothing spent"
+        );
+    }
+
+    #[test]
+    fn confirm_true_reaches_the_execute_path() {
+        // The partial guard stays: confirm:true with no baseline_json must still refuse
+        // (clearly, as an error) rather than run — but it must reach THAT check, proving
+        // confirm actually authorizes execution rather than this being a coincidental Err.
+        std::env::set_var(
+            "ABPROOF_CORPUS",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/corpus-fixture/red-baseline"),
+        );
+        let req = serde_json::json!({ "manifest_yaml": MANIFEST, "confirm": true }).to_string();
+        let err = run_json(&req).expect_err("confirm without baseline_json must still refuse");
+        std::env::remove_var("ABPROOF_CORPUS");
+        assert!(
+            err.contains("baseline_json is required for a confirmed run"),
+            "confirm:true must reach the execute path's baseline guard; got: {err}"
+        );
     }
 
     #[test]

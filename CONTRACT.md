@@ -1,7 +1,7 @@
 # abproof — Contract
 
 abproof turns a *change to your agent setup* into a stat-gated A/B verdict over a corpus, reusing
-an executor as the measured arm. Two front doors (CLI + library crate) wrap one core.
+an executor as the measured arm. Three front doors (CLI, run-json, library crate) wrap one core.
 
 ## The measurement-integrity guarantee (fail-loud, by design)
 
@@ -66,7 +66,31 @@ abproof run <manifest.yaml> [--dry-run | --confirm] [--out <path>] [--max-cost <
 Run-time inputs are resolved by env (`ABPROOF_CORPUS`, `ABPROOF_EXECUTE_NODE`, `ABPROOF_RESULTS`),
 each falling back to a walk-up from the CWD so it works inside a checkout without configuration.
 
-## Front door 2 — Library crate
+## Front door 2 — run-json (ADR-0052 response envelope)
+
+```
+abproof run-json
+```
+
+The surface `dotclaude measure` consumes via `ComponentInvoker` (ADR-0055). A JSON request on
+**stdin** — `{manifest_yaml, baseline_json?, dry_run?, confirm?, max_cost?, max_calls?}` — and a
+`{schema_version, status, body}` envelope on **stdout**.
+
+- **Exit is always `0`.** Unlike the CLI's gate-shaped exit codes, nothing here is in `$?` — the
+  verdict, and any abort or setup fault, is carried entirely in `status` (`ok` | `error`) and
+  `body`. A consumer that reads the exit code to decide whether to fall open is reading the wrong
+  field (abproof#27).
+- **Three states, mirroring the CLI exactly:** `dry_run: true` projects only (no baseline, driver,
+  or network); omitting `confirm` also projects — the default spends nothing; `confirm: true` (with
+  `dry_run` not set) executes, and `baseline_json` is still required to do so. `dry_run` wins if
+  both are set, same order the CLI checks `--dry-run` before `--confirm`.
+- `max_calls` pre-flight-refuses (an `error` envelope) if the projection exceeds the cap;
+  `max_cost` is passed through to the same abort-on-overspend path the CLI uses. Neither caps
+  anything when omitted — a caller that wants a bound must set it.
+- An aborted experiment (`record.aborted`) is reported as `status: error`, never wrapped as an
+  `ok` PASS.
+
+## Front door 3 — Library crate
 
 ```rust
 pub mod experiment; // load_manifest, Manifest::{validate, is_cross_loop, tracked_metrics, ...}
@@ -146,8 +170,8 @@ denominator) and `min_attainable_p` alongside the realised `p`.
 
 ## Compatibility
 
-Semver on the crate. The CLI (`run` + flags), the exit-code contract, and the manifest +
-baseline-JSON schema are the stable public surface.
+Semver on the crate. The CLI (`run` + flags), the exit-code contract, `run-json`'s request/response
+envelope (ADR-0052), and the manifest + baseline-JSON schema are the stable public surface.
 
 `DriverError` is `#[non_exhaustive]`: match it with a wildcard arm. Adding a variant is then a
 minor change rather than a breaking one — which it was not when `InvalidNode` was added.
