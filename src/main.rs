@@ -387,6 +387,17 @@ fn die1(msg: &str) -> ! {
 mod run_json_tests {
     use super::*;
 
+    // `cargo test` runs tests in parallel by default, and `ABPROOF_CORPUS` is a
+    // process-global env var — three tests below set it, call into `run_json`, then
+    // clear it. Without serialization one test's `remove_var` can land between
+    // another's `set_var` and its call, pointing that call at the real (missing)
+    // default corpus path instead of the fixture. Observed in CI as a genuine flake
+    // (`battery glob 'py-add' matched no nodes under measurement/corpus/red-baseline`),
+    // not a hypothetical. `unwrap_or_else` recovers from a poisoned lock (one test
+    // panicking while holding it) rather than cascading that panic into every test
+    // after it, which would hide the real failure behind a lock-poisoned message.
+    static CORPUS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn body_of(out: &str) -> serde_json::Value {
         let v: serde_json::Value = serde_json::from_str(out).expect("envelope is JSON");
         assert_eq!(v["schema_version"], "1");
@@ -449,6 +460,7 @@ gate_alpha: 0.10
         // defaulted to the *other* one — a request that omits `dry_run` reached the
         // execute branch with no opt-in of any kind. `confirm` is now required to
         // execute; omitting both must project, exactly like `dry_run: true` does.
+        let _guard = CORPUS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(
             "ABPROOF_CORPUS",
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -471,6 +483,7 @@ gate_alpha: 0.10
         // The partial guard stays: confirm:true with no baseline_json must still refuse
         // (clearly, as an error) rather than run — but it must reach THAT check, proving
         // confirm actually authorizes execution rather than this being a coincidental Err.
+        let _guard = CORPUS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(
             "ABPROOF_CORPUS",
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -488,6 +501,7 @@ gate_alpha: 0.10
     #[test]
     fn dry_run_emits_an_ok_projection_envelope() {
         // Point the corpus resolver at the vendored fixture (py-add battery lives there).
+        let _guard = CORPUS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(
             "ABPROOF_CORPUS",
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
