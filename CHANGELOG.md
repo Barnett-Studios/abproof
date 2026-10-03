@@ -59,6 +59,21 @@ rule stated above a breaking change is the minor position, so they belong to 0.4
 - `WilcoxonResult` gains `min_attainable_p`; `score::gate` gains an `n_nonzero` parameter.
   Both break external callers at compile time.
 
+- **`run-json` exits `0` on every error class, where it previously exited `1`** — including
+  a merely malformed manifest inside a well-formed request. The exit code was never the
+  contract: the decision (and any abort or setup fault) is carried entirely in the envelope's
+  `status`, matching both the README and the dispatch-site comment, which already agreed with
+  each other and not with the code. A panic inside `run_json` is now caught too, converted to
+  the same error envelope rather than unwinding out with exit `101`.
+
+  **`run-json` now requires `confirm: true` to execute** — the CLI's three states
+  (`--dry-run` / `--confirm` / neither, where neither spends nothing) had only two on this
+  surface, and `run-json` defaulted to the *executing* one: a request that simply omitted
+  `dry_run` reached the execute branch with no opt-in at all. Omitting `confirm` now projects,
+  exactly like `dry_run: true`. **Any caller that previously omitted both fields and supplied
+  `baseline_json` to execute must now also set `confirm: true`**, or it will silently get a
+  projection instead of a run. (#27)
+
 ### Added
 
 - `score::GateOutcome`, `score::EXIT_UNDERPOWERED`, `stats::min_attainable_p`.
