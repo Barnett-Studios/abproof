@@ -49,9 +49,11 @@ abproof run experiment.yaml --confirm --max-cost 5.00 --max-calls 200
 ```
 
 For programmatic consumers, `abproof run-json` speaks the ADR-0052 response envelope: a JSON
-request on **stdin** (`{manifest_yaml, baseline_json?, dry_run?, max_cost?, max_calls?}`), a
-`{schema_version, status, body}` envelope on **stdout**, exit 0 (the verdict — and any abort — is
-carried in the envelope). `dry_run: true` projects without executing (no baseline/driver/network).
+request on **stdin** (`{manifest_yaml, baseline_json?, dry_run?, confirm?, max_cost?,
+max_calls?}`), a `{schema_version, status, body}` envelope on **stdout**, exit 0 always — the
+verdict, and any abort or setup fault, is carried entirely in the envelope. Mirrors the CLI's three
+states: `dry_run: true` projects explicitly; omitting `confirm` also projects — nothing is spent by
+default; only `confirm: true` (with `dry_run` not set) executes, and still requires `baseline_json`.
 An aborted experiment is reported as `status: error` so a consumer falls open rather than trusting
 an invalid PASS.
 
