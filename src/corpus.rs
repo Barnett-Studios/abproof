@@ -33,11 +33,13 @@ pub struct CorpusNode {
     pub meta: NodeMeta,
     /// Absolute path to `measurement/corpus/red-baseline/<id>/`.
     pub dir: PathBuf,
-    /// The complete RED project as `(relative path, content)`: stub source(s),
-    /// acceptance test(s), and any scaffold (`Cargo.toml`, `go.mod`, `src/` layout).
-    /// Loaded from a `seed/` subdir if present, else synthesized from the legacy
+    /// The complete RED project: stub source(s), acceptance test(s), and any
+    /// scaffold (`Cargo.toml`, `go.mod`, `src/` layout) — raw bytes plus the
+    /// executable bit, so a binary asset (e.g. `gradle-wrapper.jar`) and an
+    /// executable script (e.g. `gradlew`) both round-trip (abproof#32). Loaded
+    /// from a `seed/` subdir if present, else synthesized from the legacy
     /// `stub.<ext>` + `acceptance_test.<ext>` pair.
-    pub seed: Vec<(String, String)>,
+    pub seed: Vec<crate::worktree::SeedFile>,
     /// Contents of `context.md` if present; `None` otherwise.
     pub context: Option<String>,
 }
@@ -135,18 +137,40 @@ pub fn load_node(dir: &Path) -> Result<CorpusNode, CorpusError> {
     let seed = if seed_dir.is_dir() {
         let mut files = Vec::new();
         collect_seed_files(&seed_dir, &seed_dir, &mut files)?;
-        files.sort(); // deterministic order regardless of readdir
+        files.sort_by(|a, b| a.path.cmp(&b.path)); // deterministic order regardless of readdir
         files
     } else {
         // Legacy: primary file gets the stub content; the acceptance test its own name.
-        let (_, stub) = find_stem_file(dir, "stub")?;
-        let (acceptance_name, acceptance) = find_stem_file(dir, "acceptance_test")?;
+        let stub = find_stem_file(dir, "stub")?;
+        let acceptance = find_stem_file(dir, "acceptance_test")?;
         let primary =
             meta.files.first().cloned().ok_or_else(|| {
                 CorpusError::Meta(meta.id.clone(), "meta.files is empty".to_string())
             })?;
-        vec![(primary, stub), (acceptance_name, acceptance)]
+        vec![
+            crate::worktree::SeedFile {
+                path: primary,
+                ..stub
+            },
+            acceptance,
+        ]
     };
+
+    // abproof#32: the seed is bytes end to end so a binary asset anywhere in it
+    // (e.g. a Gradle wrapper jar) never fails the load. But the files the model is
+    // asked to *edit* go into the prompt as text (`bridge_node`), so refuse here —
+    // at load, once, loudly — rather than let every node with a binary asset
+    // anywhere in its seed fail just because one of them happens to be editable.
+    for rel in &meta.files {
+        if let Some(f) = seed.iter().find(|f| &f.path == rel) {
+            std::str::from_utf8(&f.content).map_err(|_| {
+                CorpusError::Meta(
+                    meta.id.clone(),
+                    format!("meta.files entry '{rel}' is not valid UTF-8 — a binary file cannot be an editable file"),
+                )
+            })?;
+        }
+    }
 
     let context_path = dir.join("context.md");
     let context = if context_path.exists() {
@@ -166,11 +190,14 @@ pub fn load_node(dir: &Path) -> Result<CorpusNode, CorpusError> {
     })
 }
 
-/// Recursively collect every file under `dir` as `(path relative to `base`, content)`.
+/// Recursively collect every file under `dir` into `out` as a [`crate::worktree::SeedFile`]
+/// (path relative to `base`, raw bytes, executable bit). Bytes, not text (abproof#32): a
+/// seed may carry a non-UTF-8 asset such as a Gradle wrapper jar, and `read_to_string`
+/// hard-fails on exactly that.
 fn collect_seed_files(
     dir: &Path,
     base: &Path,
-    out: &mut Vec<(String, String)>,
+    out: &mut Vec<crate::worktree::SeedFile>,
 ) -> Result<(), CorpusError> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| CorpusError::Io(dir.to_path_buf(), e.to_string()))?;
@@ -189,21 +216,50 @@ fn collect_seed_files(
                 .to_str()
                 .ok_or_else(|| CorpusError::Io(path.clone(), "non-utf8 path".to_string()))?
                 .to_string();
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| CorpusError::Io(path.clone(), e.to_string()))?;
-            out.push((rel, content));
+            out.push(read_seed_file(&path, rel)?);
         }
     }
     Ok(())
 }
 
-/// Scan `dir` for a file whose stem equals `stem` (any extension). Returns
-/// `(filename, contents)` — the filename is needed to materialize the acceptance
-/// test under the exact name its `accept` command invokes.
+/// Read `path` into a [`crate::worktree::SeedFile`] at relative path `rel`: raw
+/// bytes (never decoded — abproof#32) plus the source file's executable bit, so a
+/// script that is `0755` on disk (e.g. `gradlew`) stays `0755` when materialized.
+/// Unix only: on any other target no file in this corpus carries a meaningful exec
+/// bit to read, so `executable` is always `false` there.
+fn read_seed_file(path: &Path, rel: String) -> Result<crate::worktree::SeedFile, CorpusError> {
+    let content =
+        std::fs::read(path).map_err(|e| CorpusError::Io(path.to_path_buf(), e.to_string()))?;
+    let executable = is_executable(path).map_err(|e| CorpusError::Io(path.to_path_buf(), e))?;
+    Ok(crate::worktree::SeedFile {
+        path: rel,
+        content,
+        executable,
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)
+        .map_err(|e| e.to_string())?
+        .permissions()
+        .mode();
+    Ok(mode & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> Result<bool, String> {
+    Ok(false)
+}
+
+/// Scan `dir` for a file whose stem equals `stem` (any extension) and read it as a
+/// [`crate::worktree::SeedFile`]. The filename is kept as `path` — the acceptance
+/// test must materialize under the exact name its `accept` command invokes.
 ///
 /// Candidates are sorted before selection so the result is deterministic regardless
 /// of the underlying filesystem readdir order.
-fn find_stem_file(dir: &Path, stem: &str) -> Result<(String, String), CorpusError> {
+fn find_stem_file(dir: &Path, stem: &str) -> Result<crate::worktree::SeedFile, CorpusError> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| CorpusError::Io(dir.to_path_buf(), e.to_string()))?;
 
@@ -218,14 +274,12 @@ fn find_stem_file(dir: &Path, stem: &str) -> Result<(String, String), CorpusErro
     candidates.sort();
 
     if let Some(path) = candidates.into_iter().next() {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| CorpusError::Io(path.clone(), e.to_string()))?;
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or_else(|| CorpusError::Io(path.clone(), "non-utf8 filename".to_string()))?
             .to_string();
-        Ok((name, content))
+        read_seed_file(&path, name)
     } else {
         Err(CorpusError::Io(
             dir.join(stem),
@@ -295,12 +349,14 @@ pub fn bridge_node(node: &CorpusNode, arm: &ArmConfig) -> NodeJson {
     let mut change = match &node.meta.change {
         Some(c) => c.clone(),
         None => {
+            // load_node already refused any meta.files entry that is not valid UTF-8
+            // (abproof#32), so this decode cannot fail for a node that reached bridge_node.
             let primary_content = node
                 .meta
                 .files
                 .first()
-                .and_then(|f| node.seed.iter().find(|(p, _)| p == f))
-                .map(|(_, c)| c.trim_end().to_string())
+                .and_then(|f| node.seed.iter().find(|s| &s.path == f))
+                .map(|s| String::from_utf8_lossy(&s.content).trim_end().to_string())
                 .unwrap_or_default();
             format!(
                 "Implement the function in {files_str} so the acceptance test passes.\n\n```\n{primary_content}\n```",
@@ -371,16 +427,51 @@ mod tests {
         assert_eq!(n.meta.id, "py-add");
         assert_eq!(n.meta.files, vec!["calc.py"]);
         assert!(
-            n.seed
-                .iter()
-                .any(|(p, c)| p == "calc.py" && c.contains("NotImplementedError")),
+            n.seed.iter().any(|f| f.path == "calc.py"
+                && String::from_utf8_lossy(&f.content).contains("NotImplementedError")),
             "seed must hold the RED calc.py stub"
         );
         assert!(
-            n.seed.iter().any(|(p, _)| p == "acceptance_test.py"),
+            n.seed.iter().any(|f| f.path == "acceptance_test.py"),
             "seed must hold the acceptance test"
         );
         assert!(n.context.is_some());
+    }
+
+    #[test]
+    fn loads_node_with_binary_seed_file_and_preserves_exec_bit() {
+        // abproof#32: a `seed/` tree may carry a non-UTF-8 asset (e.g. gradle-wrapper.jar)
+        // and an executable script (e.g. gradlew). `read_to_string` hard-fails on the
+        // former; `fs::write` silently drops the exec bit on the latter. The fixture
+        // carries both under cpp-all-your-base/seed/: bin/asset.bin (non-UTF-8) and
+        // run.sh (mode 0755).
+        let n = load_node(&fixture_root().join("cpp-all-your-base")).expect(
+            "a seed/ tree containing a binary asset must still load — not every file in \
+             the seed needs to be UTF-8, only the editable ones",
+        );
+        let asset = n
+            .seed
+            .iter()
+            .find(|f| f.path == "bin/asset.bin")
+            .expect("binary seed file must be loaded, not skipped or truncated");
+        assert_eq!(
+            asset.content,
+            std::fs::read(fixture_root().join("cpp-all-your-base/seed/bin/asset.bin")).unwrap(),
+            "binary seed content must round-trip byte-for-byte"
+        );
+        assert!(
+            !asset.executable,
+            "asset.bin carries mode 0644 in the fixture — must not be reported executable"
+        );
+        let script = n
+            .seed
+            .iter()
+            .find(|f| f.path == "run.sh")
+            .expect("run.sh must be loaded");
+        assert!(
+            script.executable,
+            "run.sh carries mode 0755 in the fixture — the loader must observe the exec bit"
+        );
     }
 
     #[test]

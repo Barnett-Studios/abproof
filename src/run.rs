@@ -1000,8 +1000,16 @@ mod tests {
             },
             dir: std::path::PathBuf::from("/tmp"),
             seed: vec![
-                ("stub.py".to_string(), String::new()),
-                ("acceptance_test.py".to_string(), String::new()),
+                crate::worktree::SeedFile {
+                    path: "stub.py".to_string(),
+                    content: Vec::new(),
+                    executable: false,
+                },
+                crate::worktree::SeedFile {
+                    path: "acceptance_test.py".to_string(),
+                    content: Vec::new(),
+                    executable: false,
+                },
             ],
             context: None,
         }
