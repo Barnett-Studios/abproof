@@ -72,8 +72,28 @@ pub enum CorpusError {
     Io(PathBuf, String),
     #[error("node '{0}': meta.yaml: {1}")]
     Meta(String, String),
-    #[error("battery glob '{0}' matched no nodes under {1}{2}")]
-    EmptyGlob(String, PathBuf, &'static str),
+    #[error("battery glob '{0}' matched no nodes under {1}{}", empty_glob_hint(.1))]
+    EmptyGlob(String, PathBuf),
+}
+
+/// abproof#26: a missing corpus and a present-but-non-matching one both produce a zero-
+/// matches `EmptyGlob`, but only the first is fixed by `$ABPROOF_CORPUS` — computed in
+/// `Display` (from `root` alone, no extra field) so the public `EmptyGlob(String, PathBuf)`
+/// shape stays exactly what it was before this fix, not a breaking change one release after
+/// the field was introduced.
+///
+/// Three states: `root` exists (a present-but-non-matching corpus — not a configuration
+/// problem, no hint); `root` is missing and `$ABPROOF_CORPUS` is unset (name the fix); `root`
+/// is missing and `$ABPROOF_CORPUS` IS set — to a path that does not exist — so the advice
+/// must be "it's set wrong," not "set it," which the caller already did.
+fn empty_glob_hint(root: &Path) -> &'static str {
+    if root.is_dir() {
+        ""
+    } else if std::env::var_os("ABPROOF_CORPUS").is_some() {
+        " (ABPROOF_CORPUS is set to a path that does not exist)"
+    } else {
+        " (this path does not exist — set $ABPROOF_CORPUS to the red-baseline corpus directory)"
+    }
 }
 
 /// Absolute path to the RED-baseline corpus root shipped with the framework.
@@ -300,23 +320,13 @@ pub fn load_battery(root: &Path, patterns: &[String]) -> Result<Vec<CorpusNode>,
     for pattern in patterns {
         let dirs = battery_matches(root, pattern)?;
         if dirs.is_empty() {
-            // abproof#26: a missing corpus and a present-but-non-matching one produce the
-            // same zero-matches result, but only the first is fixed by setting
-            // $ABPROOF_CORPUS — naming it when `root` itself isn't even a directory (the
-            // dev-checkout walk-up found nothing and fell back to its relative default)
-            // points a standalone consumer at the actual fix instead of a bare path that
-            // has no relationship to their setup.
-            let hint = if root.is_dir() {
-                ""
-            } else {
-                " (this path does not exist — set $ABPROOF_CORPUS to the red-baseline \
-                   corpus directory)"
-            };
-            return Err(CorpusError::EmptyGlob(
-                pattern.clone(),
-                root.to_path_buf(),
-                hint,
-            ));
+            // abproof#26: `EmptyGlob`'s Display (see `empty_glob_hint`) names
+            // $ABPROOF_CORPUS when `root` itself isn't even a directory — the dev-checkout
+            // walk-up found nothing and fell back to its relative default — rather than
+            // handing a standalone consumer a bare path with no relationship to their
+            // setup. A present-but-non-matching root gets no hint: that's not a
+            // configuration problem.
+            return Err(CorpusError::EmptyGlob(pattern.clone(), root.to_path_buf()));
         }
         for dir in dirs {
             nodes.push(load_node(&dir)?);
@@ -553,7 +563,7 @@ mod tests {
         let root = fixture_root();
         let patterns = vec!["nonexistent-node".to_string()];
         let err = load_battery(&root, &patterns).unwrap_err();
-        assert!(matches!(err, CorpusError::EmptyGlob(_, _, _)));
+        assert!(matches!(err, CorpusError::EmptyGlob(_, _)));
         // `root` is a real directory here (the fixture corpus) — the message must not
         // suggest a misconfiguration that isn't the actual problem.
         assert!(
@@ -563,16 +573,40 @@ mod tests {
     }
 
     // abproof#26: when `root` itself doesn't exist (the un-walked-up relative default, e.g.
-    // a standalone install with no corpus mounted), the error must name the fix rather than
-    // hand back a path with no relationship to the caller's setup.
+    // a standalone install with no corpus mounted), the error must name the fix — and name
+    // the RIGHT fix, which depends on whether $ABPROOF_CORPUS is already set. One test, not
+    // two: `empty_glob_hint` reads the process-global env directly, independent of `root`,
+    // so two tests toggling it would race under the harness's default test-parallelism.
     #[test]
-    fn load_battery_empty_glob_under_a_missing_root_names_the_env_var() {
+    fn load_battery_empty_glob_under_a_missing_root_names_the_right_fix() {
+        let prev = std::env::var("ABPROOF_CORPUS").ok();
         let root = fixture_root().join("this-directory-does-not-exist");
         let patterns = vec!["anything".to_string()];
-        let err = load_battery(&root, &patterns).unwrap_err();
+
+        std::env::remove_var("ABPROOF_CORPUS");
+        // `.to_string()` NOW, not after restoring the env below — Display is lazy, and the
+        // hint is computed from the env at format time, not at construction time.
+        let unset_err = load_battery(&root, &patterns).unwrap_err().to_string();
+
+        std::env::set_var("ABPROOF_CORPUS", &root);
+        let set_err = load_battery(&root, &patterns).unwrap_err().to_string();
+
+        match prev {
+            Some(v) => std::env::set_var("ABPROOF_CORPUS", v),
+            None => std::env::remove_var("ABPROOF_CORPUS"),
+        }
+
         assert!(
-            err.to_string().contains("ABPROOF_CORPUS"),
-            "a missing corpus root must point at $ABPROOF_CORPUS: {err}"
+            unset_err.contains("set $ABPROOF_CORPUS"),
+            "with the var UNSET, a missing corpus root must say to set it: {unset_err}"
+        );
+        // The third state: the var IS set, but to a path that happens not to exist (a
+        // typo, a stale mount) — the advice must be "it's set wrong," not "set it," which
+        // the caller already did.
+        assert!(
+            set_err.contains("is set to a path that does not exist"),
+            "with the var SET to a missing path, the message must say so, not tell the \
+             caller to set a variable they already set: {set_err}"
         );
     }
 
