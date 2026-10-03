@@ -5,10 +5,13 @@ an executor as the measured arm. Three front doors (CLI, run-json, library crate
 
 ## The measurement-integrity guarantee (fail-loud, by design)
 
-> abproof never presents an invalid measurement as a result. An aborted run (local runtime down,
-> cost cap hit mid-battery, unknown per-call cost) exits **3** with an explicit `EXPERIMENT
-> ABORTED` message — not a green gate line. A setup fault (bad manifest, missing baseline) exits
-> **1**. This is the deliberate inverse of a live-loop component's fail-open: an *offline* oracle
+> abproof never presents an invalid measurement as a result. On the **CLI** (Front door 1), an
+> aborted run (local runtime down, cost cap hit mid-battery, unknown per-call cost) exits **3**
+> with an explicit `EXPERIMENT ABORTED` message — not a green gate line. A setup fault (bad
+> manifest, missing baseline) exits **1**. `run-json` (Front door 2) does not share this exit-code
+> contract: it exits **0** unconditionally, carrying the identical abort-vs-setup-fault
+> distinction in the envelope's `status`/`body` rather than in `$?` — see Front door 2 below. This
+> is the deliberate inverse of a live-loop component's fail-open: an *offline* oracle
 > that hid a broken run behind a PASS would defeat its own purpose. It still honours the
 > constitution — abproof is offline and never feeds the live agent loop; its absence just means the
 > harness goes unmeasured.

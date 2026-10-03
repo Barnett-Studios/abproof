@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage: abproof run <manifest.yaml> \
 [--dry-run | --confirm] [--out <path>] [--max-cost <usd>] [--max-calls <n>]\n\
-       abproof run-json   (ADR-0052 envelope: request on stdin, response on stdout)";
+       abproof run-json   (ADR-0052 envelope: request on stdin, response on stdout;\n\
+                           exits 0 always — outcome is in the envelope's status;\n\
+                           executes only with confirm:true, else projects)";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -223,9 +225,40 @@ fn run_json_cli() -> i32 {
         println!("{out}");
         return code;
     }
-    let (out, code) = respond(run_json(&input));
+    let result = catch_json_panic(|| run_json(&input));
+    let (out, code) = respond(result);
     println!("{out}");
     code
+}
+
+/// "Exits 0 always" is a promise about THIS process, not just the happy path through
+/// `run_json` — an unanchored panic (an unwrap on a surprising manifest, a slice index)
+/// would otherwise unwind straight out of `main` with Rust's own panic exit (101) and a
+/// raw panic message on stderr, bypassing the envelope entirely. This turns that into the
+/// same error envelope every other failure gets, so run-json's contract has no escape
+/// hatch a caller has to special-case. Isolated from `run_json_cli` (same reason as
+/// `respond`) so the panic-to-envelope conversion is unit-testable with a deliberately
+/// panicking closure, not only observable by accident on a real malformed input.
+fn catch_json_panic<F: FnOnce() -> Result<String, String>>(f: F) -> Result<String, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+        // `&payload` (payload: Box<dyn Any + Send>) coerces to `&(dyn Any + Send)` by
+        // treating the BOX ITSELF as the Any value (a Box<dyn Any> is, trivially, its
+        // own Any), not the panic payload inside it — downcast_ref then always misses
+        // and every panic silently fell into "non-string panic payload". `&*payload`
+        // derefs the box first, so the trait object really is the payload.
+        Err(format!("internal panic: {}", panic_message(&*payload)))
+    })
+}
+
+/// Best-effort text for a caught panic payload. `panic!`/`unwrap`/`expect` all pass either
+/// a `&str` or a `String`; anything else (a custom payload via `panic_any`) falls back to a
+/// fixed message rather than failing to report the panic at all.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
 /// Turn a `run_json` result into the printed envelope and the process exit code. Exit is
@@ -387,15 +420,16 @@ fn die1(msg: &str) -> ! {
 mod run_json_tests {
     use super::*;
 
-    // `cargo test` runs tests in parallel by default, and `ABPROOF_CORPUS` is a
-    // process-global env var — three tests below set it, call into `run_json`, then
-    // clear it. Without serialization one test's `remove_var` can land between
-    // another's `set_var` and its call, pointing that call at the real (missing)
-    // default corpus path instead of the fixture. Observed in CI as a genuine flake
-    // (`battery glob 'py-add' matched no nodes under measurement/corpus/red-baseline`),
-    // not a hypothetical. `unwrap_or_else` recovers from a poisoned lock (one test
-    // panicking while holding it) rather than cascading that panic into every test
-    // after it, which would hide the real failure behind a lock-poisoned message.
+    // `cargo test` runs tests in parallel by default, and `ABPROOF_CORPUS` /
+    // `ABPROOF_EXECUTE_NODE` are process-global env vars — several tests below set
+    // one or both, call into `run_json`, then clear them. Without serialization one
+    // test's `remove_var` can land between another's `set_var` and its call,
+    // pointing that call at the real (missing) default path instead of the fixture
+    // / spy script. Observed in CI as a genuine flake (`battery glob 'py-add'
+    // matched no nodes under measurement/corpus/red-baseline`), not a hypothetical.
+    // `unwrap_or_else` recovers from a poisoned lock (one test panicking while
+    // holding it) rather than cascading that panic into every test after it, which
+    // would hide the real failure behind a lock-poisoned message.
     static CORPUS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn body_of(out: &str) -> serde_json::Value {
@@ -430,6 +464,43 @@ gate_alpha: 0.10
     fn manifest_parse_error_is_reported() {
         let req = serde_json::json!({ "manifest_yaml": "::: not a manifest :::" }).to_string();
         assert!(run_json(&req).is_err());
+    }
+
+    #[test]
+    fn catch_json_panic_converts_a_panic_into_an_error_not_a_process_abort() {
+        // The mechanism `run_json_cli` leans on so "exits 0 always" holds even when
+        // `run_json` itself panics. A deliberately panicking closure stands in for a
+        // surprising unwrap/index inside run_json — exercising the conversion directly
+        // rather than hoping some future malformed input happens to trigger one.
+        //
+        // Suppress the default panic hook's stderr print for this one deliberate panic
+        // — it's expected and caught, not a real test failure to report. The hook is
+        // process-global too, so this is serialized against the other tests in this
+        // module for the same reason CORPUS_ENV_LOCK exists: a concurrent real test
+        // failure must not have its panic message swallowed by this one's no-op hook.
+        let _guard = CORPUS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = catch_json_panic(|| panic!("surprise: {}", "simulated failure"));
+        std::panic::set_hook(prev_hook);
+
+        let err = result.expect_err("a caught panic must become an Err, not propagate");
+        assert!(
+            err.contains("surprise: simulated failure"),
+            "panic message must be preserved in the error; got: {err}"
+        );
+    }
+
+    #[test]
+    fn catch_json_panic_passes_a_normal_result_through_unchanged() {
+        assert_eq!(
+            catch_json_panic(|| Ok("fine".to_string())),
+            Ok("fine".to_string())
+        );
+        assert_eq!(
+            catch_json_panic(|| Err("nope".to_string())),
+            Err("nope".to_string())
+        );
     }
 
     #[test]
@@ -475,6 +546,51 @@ gate_alpha: 0.10
         assert_eq!(
             v["body"]["mode"], "dry_run",
             "omitting confirm must behave like dry_run: true — nothing spent"
+        );
+    }
+
+    // Unix-only: a `#!/bin/sh` spy script, same constraint `worktree`'s own exec-bit
+    // handling already carries (the supported platform is macOS/Linux).
+    #[cfg(unix)]
+    #[test]
+    fn omitting_confirm_never_invokes_the_driver() {
+        // The test above asserts the *response* says "dry_run" — this one proves the
+        // executor was never spawned at all, not just that the reported mode agrees.
+        // ABPROOF_EXECUTE_NODE points at a spy script that leaves a sentinel file
+        // behind if it is ever invoked; omitting confirm must leave it absent.
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = CORPUS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let pid = std::process::id();
+        let sentinel = std::env::temp_dir().join(format!("abproof-spy-{pid}.sentinel"));
+        let spy_script = std::env::temp_dir().join(format!("abproof-spy-{pid}.sh"));
+        let _ = std::fs::remove_file(&sentinel);
+        std::fs::write(
+            &spy_script,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", sentinel.display()),
+        )
+        .expect("write spy script");
+        std::fs::set_permissions(&spy_script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod spy script");
+
+        std::env::set_var("ABPROOF_EXECUTE_NODE", &spy_script);
+        std::env::set_var(
+            "ABPROOF_CORPUS",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/corpus-fixture/red-baseline"),
+        );
+        let req = serde_json::json!({ "manifest_yaml": MANIFEST }).to_string();
+        let result = run_json(&req);
+        std::env::remove_var("ABPROOF_EXECUTE_NODE");
+        std::env::remove_var("ABPROOF_CORPUS");
+        let _ = std::fs::remove_file(&spy_script);
+        let invoked = sentinel.exists();
+        let _ = std::fs::remove_file(&sentinel);
+
+        result.expect("omitting confirm must still project successfully");
+        assert!(
+            !invoked,
+            "omitting confirm must never spawn the executor script at all"
         );
     }
 
