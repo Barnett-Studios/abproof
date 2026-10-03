@@ -16,7 +16,7 @@ shipped inside the `v0.3.0` tag. They were always unreleased work, and under car
 rule stated above a breaking change is the minor position, so they belong to 0.4.0 (#23).
 0.3.0 itself has no section here, which is the same policy as every release before it.
 
-## [0.4.0] — unreleased
+## [0.4.0] — 2026-10-03
 
 ### Fixed
 
