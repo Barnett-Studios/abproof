@@ -16,6 +16,14 @@ shipped inside the `v0.3.0` tag. They were always unreleased work, and under car
 rule stated above a breaking change is the minor position, so they belong to 0.4.0 (#23).
 0.3.0 itself has no section here, which is the same policy as every release before it.
 
+## [0.4.1] — 2026-10-03
+
+### Fixed
+
+- The README's docker install line mounts the corpus and sets `ABPROOF_CORPUS`; it previously
+  always exited 1. An empty battery glob now says why when the corpus root is missing — whether
+  `ABPROOF_CORPUS` is unset or set to a path that does not exist (#26). No API change.
+
 ## [0.4.0] — 2026-10-03
 
 ### Fixed
