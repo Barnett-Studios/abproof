@@ -30,7 +30,8 @@ single model call — the executor is the arm.
 ```sh
 brew tap Barnett-Studios/tap && brew install abproof   # macOS/Linux
 cargo install abproof                                   # any platform
-docker run --rm -v "$PWD:/repo" ghcr.io/barnett-studios/abproof run experiment.yaml --dry-run
+docker run --rm -v "$PWD:/repo" -v "/path/to/corpus/red-baseline:/corpus:ro" \
+  -e ABPROOF_CORPUS=/corpus ghcr.io/barnett-studios/abproof run experiment.yaml --dry-run
 ```
 
 Linux release binaries (`x86_64`/`aarch64-unknown-linux-gnu`) target **glibc 2.28+** — Debian 10+,

@@ -72,8 +72,8 @@ pub enum CorpusError {
     Io(PathBuf, String),
     #[error("node '{0}': meta.yaml: {1}")]
     Meta(String, String),
-    #[error("battery glob '{0}' matched no nodes under {1}")]
-    EmptyGlob(String, PathBuf),
+    #[error("battery glob '{0}' matched no nodes under {1}{2}")]
+    EmptyGlob(String, PathBuf, &'static str),
 }
 
 /// Absolute path to the RED-baseline corpus root shipped with the framework.
@@ -300,7 +300,23 @@ pub fn load_battery(root: &Path, patterns: &[String]) -> Result<Vec<CorpusNode>,
     for pattern in patterns {
         let dirs = battery_matches(root, pattern)?;
         if dirs.is_empty() {
-            return Err(CorpusError::EmptyGlob(pattern.clone(), root.to_path_buf()));
+            // abproof#26: a missing corpus and a present-but-non-matching one produce the
+            // same zero-matches result, but only the first is fixed by setting
+            // $ABPROOF_CORPUS — naming it when `root` itself isn't even a directory (the
+            // dev-checkout walk-up found nothing and fell back to its relative default)
+            // points a standalone consumer at the actual fix instead of a bare path that
+            // has no relationship to their setup.
+            let hint = if root.is_dir() {
+                ""
+            } else {
+                " (this path does not exist — set $ABPROOF_CORPUS to the red-baseline \
+                   corpus directory)"
+            };
+            return Err(CorpusError::EmptyGlob(
+                pattern.clone(),
+                root.to_path_buf(),
+                hint,
+            ));
         }
         for dir in dirs {
             nodes.push(load_node(&dir)?);
@@ -537,7 +553,27 @@ mod tests {
         let root = fixture_root();
         let patterns = vec!["nonexistent-node".to_string()];
         let err = load_battery(&root, &patterns).unwrap_err();
-        assert!(matches!(err, CorpusError::EmptyGlob(_, _)));
+        assert!(matches!(err, CorpusError::EmptyGlob(_, _, _)));
+        // `root` is a real directory here (the fixture corpus) — the message must not
+        // suggest a misconfiguration that isn't the actual problem.
+        assert!(
+            !err.to_string().contains("ABPROOF_CORPUS"),
+            "a present root with a non-matching pattern is not a config hint case: {err}"
+        );
+    }
+
+    // abproof#26: when `root` itself doesn't exist (the un-walked-up relative default, e.g.
+    // a standalone install with no corpus mounted), the error must name the fix rather than
+    // hand back a path with no relationship to the caller's setup.
+    #[test]
+    fn load_battery_empty_glob_under_a_missing_root_names_the_env_var() {
+        let root = fixture_root().join("this-directory-does-not-exist");
+        let patterns = vec!["anything".to_string()];
+        let err = load_battery(&root, &patterns).unwrap_err();
+        assert!(
+            err.to_string().contains("ABPROOF_CORPUS"),
+            "a missing corpus root must point at $ABPROOF_CORPUS: {err}"
+        );
     }
 
     #[test]
