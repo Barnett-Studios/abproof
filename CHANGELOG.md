@@ -16,6 +16,13 @@ shipped inside the `v0.3.0` tag. They were always unreleased work, and under car
 rule stated above a breaking change is the minor position, so they belong to 0.4.0 (#23).
 0.3.0 itself has no section here, which is the same policy as every release before it.
 
+## [0.4.2] — 2026-10-24
+
+### Security
+
+- Replace the unmaintained `serde_yaml` (pulled `unsafe-libyaml`, RUSTSEC-2024-0449) with its
+  maintained fork `serde_norway` (#42). No API change.
+
 ## [0.4.1] — 2026-10-03
 
 ### Fixed
